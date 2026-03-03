@@ -113,6 +113,8 @@ def classify_zones(
     if 'datetime' in joined.columns:
         rename_cols['datetime'] = 'OrderStart'
     if 'incident_name' in joined.columns:
+        valid_mask = joined['incident_name'].notna()
+        joined.loc[valid_mask, 'incident_name'] = joined.loc[valid_mask, 'incident_name'].astype(str).str.title()
         rename_cols['incident_name'] = 'FireEvent'
         
     joined = joined.rename(columns=rename_cols)

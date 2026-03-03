@@ -57,9 +57,9 @@ graph TD
 *   **Outputs**: A `pd.Series` of Categorical strings (e.g., `'SELE'`, `'FEUO'`, `'NER'`).
 
 ### 6. `ember.metrics`
-**Purpose**: Generates publication-ready metrics and plots.
+**Purpose**: Generates publication-ready metrics and plots, natively handling timezone-aware datasets.
 *   **Inputs**: The classified records DataFrame.
-*   **Outputs**: Aggregated DataFrames (Compliance Rates, DEDI) and matplotlib plots (Departure Curves).
+*   **Outputs**: Aggregated DataFrames (Compliance Rates, DEDI) and matplotlib plots (`plot_departure_curve`, `plot_evacuation_composition`, `plot_temporal_heatmap`, `plot_return_timeline`, `plot_delay_map`).
 
 ## Configurable Hyperparameters
 
@@ -81,7 +81,7 @@ sequenceDiagram
     participant Zones as ember.zones
     participant Behavior as ember.behavior
     
-    User->>IO: load_shards("data_sample/")
+    User->>IO: load_shards("data/")
     IO-->>User: Raw Pings (DataFrame)
     
     User->>Ghost: infer_homes(pings, min_nights=14)

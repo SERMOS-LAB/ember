@@ -3,6 +3,16 @@ __pycache__/
 *.py[cod]
 *$py.class
 
+# Data files
+*.csv
+*.json
+*.pkl
+*.shp
+*.shx
+*.dbf
+*.geojson
+*.gpkg
+
 # C extensions
 *.so
 

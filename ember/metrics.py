@@ -49,7 +49,7 @@ def compliance_rate(
 
 def dedi(
     records: pd.DataFrame,
-    spatial_unit: str = "SubRegion"
+    spatial_unit: str = "ZoneType"
 ) -> pd.DataFrame:
     """
     Damage-Evacuation Disparity Index (DEDI).
@@ -169,9 +169,19 @@ def plot_departure_curve(
         elif df is not None and start_ref is not None:
             evacuees = df[df['Category'] != 'NER'].copy()
             if 'DepartureDate' in evacuees.columns:
-                evacuees['DepartureDate'] = pd.to_datetime(evacuees['DepartureDate'])
-                evacuees['Hours_From_Start'] = (evacuees['DepartureDate'] - start_ref).dt.total_seconds() / 3600.0
-                subset = evacuees[(evacuees['Hours_From_Start'] >= 0) & (evacuees['Hours_From_Start'] <= 72)].copy()
+                try:
+                    evacuees['DepartureDate'] = pd.to_datetime(evacuees['DepartureDate'])
+                    # Safely remove timezone if present to avoid subtraction errors
+                    if evacuees['DepartureDate'].dt.tz is not None:
+                        evacuees['DepartureDate'] = evacuees['DepartureDate'].dt.tz_localize(None)
+                    if getattr(start_ref, 'tzinfo', None) is not None:
+                        start_ref = start_ref.tz_localize(None)
+                        
+                    evacuees['Hours_From_Start'] = (evacuees['DepartureDate'] - start_ref).dt.total_seconds() / 3600.0
+                    subset = evacuees[(evacuees['Hours_From_Start'] >= 0) & (evacuees['Hours_From_Start'] <= 72)].copy()
+                except Exception as e:
+                    print(f"Error parsing DepartureDate timezone or calculating hours: {e}")
+                    return
                 
                 if group_col and group_col in subset.columns:
                     groups = subset[group_col].unique()
@@ -184,34 +194,78 @@ def plot_departure_curve(
                 if grand_total > 0:
                     subset_sorted = subset.sort_values('Hours_From_Start')
                     subset_sorted['cumulative_pct'] = (np.arange(grand_total) + 1) / grand_total * 100
-                    sns.lineplot(data=subset_sorted, x='Hours_From_Start', y='cumulative_pct', label="Overall", color='black', linestyle='--', linewidth=2, ax=ax)
+                    sns.lineplot(data=subset_sorted, x='Hours_From_Start', y='cumulative_pct', label=f"All Residents (n={grand_total})", color='black', linestyle='--', linewidth=2, alpha=0.6, ax=ax)
             
-                colors_map = {'Ordered Evacuee': 'red', 'Evacuee under Warning': 'orange', 'Shadow Evacuee': 'green', 'Self-Evacuee': 'blue', 'All': 'black'}
+                colors_map = {
+                    'Fully-compliant Evacuee Under Order': 'red', 'Ordered Evacuee': 'red', 'FEUO': 'red',
+                    'Fully-compliant Evacuee Under Warning': 'orange', 'Evacuee under Warning': 'orange', 'FEUW': 'orange',
+                    'Shadow Evacuee From Nearby': 'green', 'Shadow Evacuee': 'green', 'SEFN': 'green',
+                    'Self-Evacuee Leaving Early': 'blue', 'Self-Evacuee': 'blue', 'SELE': 'blue',
+                    'Partially-compliant Evacuee (Early Returner)': 'purple', 'PERE': 'purple',
+                    'Order': '#F44336', 'Warning': '#FF9800', 'Buffer': '#2196F3',
+                    'Palisades': '#E91E63', 'Eaton': '#9C27B0', 'East Altadena': 'dodgerblue', 'West Altadena': 'teal',
+                    'All': 'black'
+                }
                     
                 for g in groups:
                     group_data = subset[subset[group_col] == g].sort_values('Hours_From_Start')
                     if group_data.empty: continue
-                    group_data['cumulative_count'] = np.arange(len(group_data)) + 1
-                    group_data['pct_of_total'] = group_data['cumulative_count'] / grand_total * 100
-                    sns.lineplot(data=group_data, x='Hours_From_Start', y='pct_of_total', label=f"{g}", color=colors_map.get(g, None), ax=ax, linewidth=2)
+                    group_total = len(group_data)
+                    group_data['cumulative_count'] = np.arange(group_total) + 1
+                    group_data['pct_of_group'] = group_data['cumulative_count'] / group_total * 100
+                    sns.lineplot(data=group_data, x='Hours_From_Start', y='pct_of_group', label=f"{g} (n={group_total})", color=colors_map.get(g, None), ax=ax, linewidth=2, alpha=0.6)
                     
                 if night_shades:
-                    for (start, end) in night_shades:
-                        ax.axvspan(start, end, alpha=0.10, color='grey', hatch='///')
-                        ax.text((start+end)/2, 2, "Night", ha='center', fontsize=8, color='black')
+                    for (ns_start, ns_end) in night_shades:
+                        # Convert Timestamps to hours-from-start_ref if needed
+                        if isinstance(ns_start, pd.Timestamp):
+                            ns_start = ns_start.tz_localize(None) if ns_start.tz is not None else ns_start
+                            ns_start = (ns_start - start_ref).total_seconds() / 3600.0
+                        if isinstance(ns_end, pd.Timestamp):
+                            ns_end = ns_end.tz_localize(None) if ns_end.tz is not None else ns_end
+                            ns_end = (ns_end - start_ref).total_seconds() / 3600.0
+                        
+                        if ns_start > 48:
+                            continue
+                            
+                        draw_end = min(ns_end, 48)
+                        ax.axvspan(ns_start, draw_end, alpha=0.10, color='grey', hatch='///')
+                        mid = ns_start + (draw_end - ns_start) / 2
+                        ax.text(mid, 2, "Night", ha='center', fontsize=8, color='black')
             
+                # Extract automatic offsets if none provided
+                if not order_offsets:
+                    order_offsets = []
+                    for col, label in [('WarningStart', 'First Warning'), ('OrderStart', 'First Evacuation Order')]:
+                        if col in subset.columns:
+                            valid_times = pd.to_datetime(subset[col]).dropna()
+                            if not valid_times.empty:
+                                first_time = valid_times.min()
+                                offset = (first_time - start_ref).total_seconds() / 3600.0
+                                order_offsets.append((label, offset))
+
                 if order_offsets:
-                    for k, offset in order_offsets.items():
-                        ax.axvline(offset, color='purple', linestyle=':', alpha=0.8)
-                        ax.text(offset + 0.5, 90, f"{k} Order", color='purple', fontsize=9, ha='left')
+                    # Normalize dict → list of tuples
+                    if isinstance(order_offsets, dict):
+                        order_offsets = list(order_offsets.items())
+                    # To avoid messy labels if there are duplicates, keep count
+                    label_counts = {}
+                    for label, offset in order_offsets:
+                        count = label_counts.get(label, 0)
+                        label_counts[label] = count + 1
+                        display_text = label if count == 0 else f"{label} {count+1}"
+                        ax.axvline(offset, color='purple', linestyle=':', alpha=0.8, label=display_text)
+                        
+                # Add Fire Start vertical line
+                ax.axvline(x=0, color='red', linestyle='--', linewidth=2, label='Fire Start')
                         
                 ax.set_xlabel('Hours from Fire Start', fontsize=12)
                 ax.set_xlim(0, 48)
                 ax.set_ylim(0, 100)
-                plt.legend()
+                plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
 
         ax.set_title(title, fontsize=14, weight='bold')
-        ax.set_ylabel('Cumulative Percentage (%)', fontsize=12)
+        ax.set_ylabel('% of Group Evacuated', fontsize=12)
         plt.grid(True, linestyle='--', alpha=0.7)
         plt.tight_layout()
         
@@ -256,8 +310,8 @@ def plot_evacuation_composition(
     def prep_data(subset, exclude_ner=False):
         if exclude_ner:
             subset = subset[subset['Category'] != 'NER']
-        props = subset.groupby([group_col, 'Category']).size().reset_index(name='count')
-        totals = subset.groupby(group_col)['ID'].count().reset_index(name='total')
+        props = subset.groupby([group_col, 'Category'], observed=False).size().reset_index(name='count')
+        totals = subset.groupby(group_col, observed=False)['ID'].nunique().reset_index(name='total')
         props = pd.merge(props, totals, on=group_col)
         props['pct'] = (props['count'] / props['total']) * 100
         
@@ -269,25 +323,19 @@ def plot_evacuation_composition(
         return props, pivot, pivot_counts
 
     if dual_panel:
-        fig = plt.figure(figsize=(18, 8))
-        # Left side: All Categories
-        ax1 = plt.subplot2grid((4, 2), (0, 0), rowspan=3)
-        ax_table1 = plt.subplot2grid((4, 2), (3, 0))
-        
-        # Right side: Without NER
-        ax2 = plt.subplot2grid((4, 2), (0, 1), rowspan=3)
-        ax_table2 = plt.subplot2grid((4, 2), (3, 1))
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6))
         
         panels = [
-            (ax1, ax_table1, False, "Including NER (Non-Evacuating Resident)"),
-            (ax2, ax_table2, True, "Excluding NER (Evacuees Only)")
+            (ax1, False, "Including NER (Non-Evacuating Resident)"),
+            (ax2, True, "Excluding NER (Evacuees Only)")
         ]
         fig.suptitle(title, fontsize=16, weight='bold')
     else:
-        fig, (ax1, ax_table1) = plt.subplots(2, 1, figsize=(10, 8), gridspec_kw={'height_ratios': [3, 1]})
-        panels = [(ax1, ax_table1, False, title)]
+        fig, ax1 = plt.subplots(figsize=(8, 6))
+        panels = [(ax1, False, title)]
 
-    for ax, ax_table, exclude_ner, p_title in panels:
+    results = {}
+    for ax, exclude_ner, p_title in panels:
         props, pivot, pivot_counts = prep_data(df, exclude_ner)
         
         if exclude_ner:
@@ -302,22 +350,14 @@ def plot_evacuation_composition(
         ax.tick_params(axis='x', rotation=0)
         ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
         
-        table_data = []
-        row_labels = []
+        df_formatted = pd.DataFrame(index=pivot.index, columns=pivot.columns)
         for region in pivot.index:
-            row = []
             for cat in pivot.columns:
                 cnt = pivot_counts.loc[region, cat] if cat in pivot_counts.columns else 0
                 pct = pivot.loc[region, cat] if cat in pivot.columns else 0
-                row.append(f"{int(cnt)} ({pct:.1f}%)")
-            table_data.append(row)
-            row_labels.append(region)
-            
-        ax_table.axis('off')
-        tbl = ax_table.table(cellText=table_data, rowLabels=row_labels, colLabels=list(pivot.columns), cellLoc='center', loc='center')
-        tbl.auto_set_font_size(False)
-        tbl.set_fontsize(9)
-        tbl.scale(1.0, 1.4)
+                df_formatted.loc[region, cat] = f"{int(cnt)} ({pct:.1f}%)"
+                
+        results['evacuees_only' if exclude_ner else 'all'] = df_formatted
         
     plt.tight_layout()
     
@@ -328,12 +368,7 @@ def plot_evacuation_composition(
         plt.show()
     plt.close()
     
-    if output_path:
-        plt.savefig(output_path, dpi=300, bbox_inches='tight')
-        print(f"Plot saved to {output_path}")
-    else:
-        plt.show()
-    plt.close()
+    return results
 
 
 def _t2ll(x, y, level=14):
@@ -431,6 +466,274 @@ def plot_delay_map(
     plt.figtext(0.5, 0.02, "Red Outline: Evacuation Order Zone. Tiles outside = Shadow Evacuation Delay.\\nMap shows Total Delay (Hours) per 2.4km Block (Log Scale).", ha="center", fontsize=11, style='italic', backgroundcolor='white')
     plt.tight_layout(rect=[0, 0.08, 1, 0.96])
     
+    if output_path:
+        plt.savefig(output_path, dpi=300, bbox_inches='tight')
+        print(f"Plot saved to {output_path}")
+    else:
+        plt.show()
+    plt.close()
+
+
+def plot_delay_distribution(
+    df: pd.DataFrame,
+    group_col: str = "Category",
+    title: str = "Evacuation Delay Distribution",
+    output_path: str = None
+):
+    """
+    Plot box + strip chart of DelayHours by group (Category or FireEvent).
+    Only includes evacuees with DelayHours > 0.
+    """
+    try:
+        import matplotlib.pyplot as plt
+        import seaborn as sns
+    except ImportError:
+        print("Warning: matplotlib and seaborn required.")
+        return
+
+    delayed = df[(df['DelayHours'] > 0) & (df['DelayHours'].notna())].copy()
+    if delayed.empty:
+        print("No delay data to plot.")
+        return
+
+    cap = delayed['DelayHours'].quantile(0.95)
+    delayed = delayed.dropna(subset=[group_col])
+    order = sorted(delayed[group_col].unique())
+
+    fig, ax = plt.subplots(figsize=(10, 6))
+    sns.boxplot(
+        data=delayed, x=group_col, y='DelayHours', order=order,
+        palette='Set2', showfliers=False, ax=ax,
+        boxprops=dict(alpha=0.6)
+    )
+    sns.stripplot(
+        data=delayed, x=group_col, y='DelayHours', order=order,
+        color='black', alpha=0.15, size=3, jitter=True, ax=ax
+    )
+
+    ax.set_ylim(0, cap * 1.1)
+    ax.set_xlabel(group_col, fontsize=12)
+    ax.set_ylabel('Delay (Hours)', fontsize=12)
+    ax.set_title(title, fontsize=14, weight='bold')
+    plt.xticks(rotation=45, ha='right')
+    plt.grid(True, axis='y', linestyle='--', alpha=0.5)
+    plt.tight_layout()
+
+    if output_path:
+        plt.savefig(output_path, dpi=300, bbox_inches='tight')
+        print(f"Plot saved to {output_path}")
+    else:
+        plt.show()
+    plt.close()
+
+
+def plot_compliance_by_region(
+    df: pd.DataFrame,
+    region_col: str = "ZoneType",
+    fire_col: str = "FireEvent",
+    title: str = "Evacuation Compliance Rate by Region",
+    output_path: str = None
+):
+    """
+    Grouped bar chart of compliance rates across spatial sub-regions, colored by fire event.
+    """
+    try:
+        import matplotlib.pyplot as plt
+        import seaborn as sns
+    except ImportError:
+        print("Warning: matplotlib and seaborn required.")
+        return
+
+    if region_col not in df.columns:
+        print(f"Column '{region_col}' not found.")
+        return
+
+    evac_cats = ['SELE', 'PERE', 'FEUO', 'FEUW', 'SEFN']
+    group_cols = [region_col]
+    if fire_col in df.columns:
+        group_cols.append(fire_col)
+
+    stats = df.groupby(group_cols, observed=False).apply(
+        lambda g: pd.Series({
+            'Total': len(g),
+            'Evacuated': g['Category'].isin(evac_cats).sum(),
+            'Rate': g['Category'].isin(evac_cats).mean() * 100
+        }), include_groups=False
+    ).reset_index()
+
+    if stats.empty or 'Total' not in stats.columns:
+        print(f"Not enough data to group by '{region_col}'. Check for NaN values.")
+        return
+
+    stats = stats[stats['Total'] >= 10]
+
+    if stats.empty:
+        print("Not enough data per region.")
+        return
+
+    fig, ax = plt.subplots(figsize=(12, 6))
+    hue = fire_col if fire_col in stats.columns else None
+    sns.barplot(
+        data=stats, x=region_col, y='Rate', hue=hue,
+        palette='tab10', edgecolor='black', alpha=0.8, ax=ax
+    )
+
+    ax.set_xlabel(region_col.replace('_', ' ').title(), fontsize=12)
+    ax.set_ylabel('Compliance Rate (%)', fontsize=12)
+    ax.set_title(title, fontsize=14, weight='bold')
+    ax.set_ylim(0, 100)
+    plt.xticks(rotation=45, ha='right')
+    plt.grid(True, axis='y', linestyle='--', alpha=0.5)
+    if hue:
+        ax.legend(title=fire_col, bbox_to_anchor=(1.05, 1), loc='upper left')
+    plt.tight_layout()
+
+    if output_path:
+        plt.savefig(output_path, dpi=300, bbox_inches='tight')
+        print(f"Plot saved to {output_path}")
+    else:
+        plt.show()
+    plt.close()
+
+
+def plot_temporal_heatmap(
+    df: pd.DataFrame,
+    fire_start: str = None,
+    title: str = "Hourly Departure Heatmap",
+    output_path: str = None
+):
+    """
+    2D heatmap of departure counts: x = hour of day, y = date.
+    Only includes rows with valid DepartureDate.
+    """
+    try:
+        import matplotlib.pyplot as plt
+        import seaborn as sns
+    except ImportError:
+        print("Warning: matplotlib and seaborn required.")
+        return
+
+    departures = df[df['DepartureDate'].notna()].copy()
+    if departures.empty:
+        print("No departure data.")
+        return
+
+    departures['DepartureDate'] = pd.to_datetime(departures['DepartureDate'])
+    
+    if departures['DepartureDate'].dt.tz is not None:
+        departures['DepartureDate'] = departures['DepartureDate'].dt.tz_localize(None)
+
+    departures['dep_date'] = departures['DepartureDate'].dt.date
+    departures['dep_hour'] = departures['DepartureDate'].dt.hour
+
+    if fire_start:
+        fs = pd.Timestamp(fire_start)
+        if getattr(fs, 'tzinfo', None) is not None:
+            fs = fs.tz_localize(None)
+        departures = departures[
+            (departures['DepartureDate'] >= fs) &
+            (departures['DepartureDate'] <= fs + pd.Timedelta(days=7))
+        ]
+
+    pivot = departures.groupby(['dep_date', 'dep_hour']).size().reset_index(name='count')
+    heatmap_data = pivot.pivot(index='dep_date', columns='dep_hour', values='count').fillna(0)
+
+    for h in range(24):
+        if h not in heatmap_data.columns:
+            heatmap_data[h] = 0
+    heatmap_data = heatmap_data[sorted(heatmap_data.columns)]
+    heatmap_data.index = [str(d) for d in heatmap_data.index]
+
+    fig, ax = plt.subplots(figsize=(14, 5))
+    sns.heatmap(
+        heatmap_data, cmap='YlOrRd', annot=True, fmt='.0f',
+        linewidths=0.5, ax=ax, cbar_kws={'label': 'Number of Departures'}
+    )
+    ax.set_xlabel('Hour of Day', fontsize=12)
+    ax.set_ylabel('Date', fontsize=12)
+    ax.set_title(title, fontsize=14, weight='bold')
+    plt.tight_layout()
+
+    if output_path:
+        plt.savefig(output_path, dpi=300, bbox_inches='tight')
+        print(f"Plot saved to {output_path}")
+    else:
+        plt.show()
+    plt.close()
+
+
+def plot_return_timeline(
+    df: pd.DataFrame,
+    fire_start: str = None,
+    group_col: str = "Category",
+    title: str = "Return Behavior Timeline",
+    output_path: str = None
+):
+    """
+    Scatter/strip plot of return times (hours from fire start) by Category.
+    Shows how quickly different evacuee groups return home.
+    """
+    try:
+        import matplotlib.pyplot as plt
+        import seaborn as sns
+    except ImportError:
+        print("Warning: matplotlib and seaborn required.")
+        return
+
+    returners = df[df['ReturnDate'].notna()].copy()
+    if returners.empty:
+        print("No return data.")
+        return
+
+    returners['ReturnDate'] = pd.to_datetime(returners['ReturnDate'])
+    if returners['ReturnDate'].dt.tz is not None:
+        returners['ReturnDate'] = returners['ReturnDate'].dt.tz_localize(None)
+
+    if fire_start:
+        ref = pd.Timestamp(fire_start)
+    elif 'OrderStart' in returners.columns:
+        ref = pd.to_datetime(returners['OrderStart']).min()
+    else:
+        ref = returners['ReturnDate'].min()
+
+    if getattr(ref, 'tzinfo', None) is not None:
+        ref = ref.tz_localize(None)
+
+    returners['return_hours'] = (returners['ReturnDate'] - ref).dt.total_seconds() / 3600.0
+    returners = returners[returners['return_hours'] >= 0]
+    returners = returners[returners['return_hours'] <= 720]
+
+    category_order = ['SELE', 'PERE', 'FEUW', 'FEUO', 'SEFN']
+    returners = returners[returners[group_col].isin(category_order)]
+
+    colors = {
+        'SELE': '#2196F3', 'PERE': '#4CAF50', 'FEUW': '#FF9800',
+        'FEUO': '#F44336', 'SEFN': '#9C27B0'
+    }
+
+    fig, ax = plt.subplots(figsize=(12, 6))
+    sns.stripplot(
+        data=returners, x=group_col, y='return_hours', order=category_order,
+        palette=colors, alpha=0.4, size=4, jitter=0.35, ax=ax
+    )
+    sns.boxplot(
+        data=returners, x=group_col, y='return_hours', order=category_order,
+        color='white', showfliers=False, ax=ax,
+        boxprops=dict(alpha=0.7, edgecolor='black'),
+        medianprops=dict(color='red', linewidth=2)
+    )
+
+    ax.axhline(y=24, color='gray', linestyle='--', alpha=0.5, label='24 hours')
+    ax.axhline(y=72, color='gray', linestyle=':', alpha=0.5, label='3 days')
+    ax.axhline(y=168, color='gray', linestyle='-.', alpha=0.5, label='1 week')
+
+    ax.set_xlabel('Evacuee Category', fontsize=12)
+    ax.set_ylabel('Hours from Fire Start to Return', fontsize=12)
+    ax.set_title(title, fontsize=14, weight='bold')
+    ax.legend(loc='upper right')
+    plt.grid(True, axis='y', linestyle='--', alpha=0.3)
+    plt.tight_layout()
+
     if output_path:
         plt.savefig(output_path, dpi=300, bbox_inches='tight')
         print(f"Plot saved to {output_path}")

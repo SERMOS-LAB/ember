@@ -1,5 +1,5 @@
 """
-EMBER: Evacuation Mobility Behavior Inference.
+EMBER: Evacuation Modeling from Behavioral Evidence in Records.
 
 A modular toolkit for inferring wildfire evacuation behaviors from GPS data.
 """
@@ -11,6 +11,7 @@ from . import zones
 from . import behavior
 from . import departure
 from . import metrics
+from . import pipeline
 
 __all__ = [
     "io",
@@ -18,4 +19,5 @@ __all__ = [
     "behavior",
     "departure",
     "metrics",
+    "pipeline",
 ]

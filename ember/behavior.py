@@ -58,6 +58,10 @@ def classify(
         fire_start = row.get(fire_start_col) if fire_start_col else None
         order_end = row.get(order_end_col) if order_end_col else None
         
+        # Fallback to fire_start for un-ordered zones
+        if pd.isna(order_start) and zone in ('Buffer', 'Outside') and fire_start is not None and not pd.isna(fire_start):
+            order_start = fire_start
+
         # Missing order start? We can't classify compliant vs non-compliant accurately
         if pd.isna(order_start):
             return 'UR'

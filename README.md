@@ -1,14 +1,15 @@
-# EMBER: Evacuation Mobility Behavior Inference 
+# EMBER: Evacuation Mobility Behavior Extraction and Routing
 
-`ember` is a highly modular, pip-installable Python package for inferring wildfire evacuation behavior from GPS-derived human mobility data. 
+`ember` is a highly modular Python package for inferring wildfire evacuation behavior from GPS-derived human mobility data. 
 
-It is designed to consume pre-processed mobility data (either raw GPS pings or cleaned stay-points) and apply standardized spatiotemporal algorithms to classify behavior according to the 7-category taxonomy (Sun et al., 2024; Zhao et al., 2022).
+It is designed to consume pre-processed mobility data (either raw GPS pings or cleaned stay-points) and apply standardized spatiotemporal algorithms to classify behavior according to the 7-category taxonomy (Nima et al., 2025; Zhao et al., 2022).
 
 ## Installation
 
-You can install `ember` locally in editable mode alongside its dependencies:
+As EMBER is currently in development and not yet available on PyPI, you should install it from source by cloning the repository:
 
 ```bash
+git clone <repository_url>
 cd ember
 pip install -e .
 ```
@@ -24,38 +25,32 @@ EMBER is designed to abstract away the boilerplate CRS transformations and spati
 *   **`ember.zones`**: Matches assigned home locations to timestamped spatial evacuation polygons (Order, Warning, Buffer definitions).
 *   **`ember.behavior`**: The core taxonomy classifier mapping 7 distinct behavioral outcomes (SELE, FEUO, FEUW, PERE, SEFN, NER, UR) based on departure timing and zone constraints.
 *   **`ember.departure`**: Infers $T_{dep}$ and $T_{ret}$ from raw GPS sequences by detecting extended trips away from the proxy home.
-*   **`ember.metrics`**: Generates high-level metrics like Evacuation Compliance Rates, cumulative departure curves, and the micro-macro DEDI (Damage-Evacuation Disparity Index).
+*   **`ember.metrics`**: Generates high-level aggregated metrics and publication-ready visualizations, including Evacuation Compliance Rates, cumulative departure curves, temporal heatmaps, return behavior timelines, spatial delay maps, and the micro-macro DEDI (Damage-Evacuation Disparity Index).
 
 ## Getting Started
 
-### 1. Generate Sample Data
-To test the package, you can generate an anonymized sample from your existing LA Fire outputs:
-```bash
-python examples/generate_sample_data.py
-```
-This will create an `examples/data_sample/` directory with a mini-cohort of users and timelines to test against.
-
-### 2. Basic Inference Pipeline
-
-Check out the interactive `examples/Ember_Example.ipynb` notebook to see the full pipeline in action. It demonstrates how to initialize the data, execute spatial joins, apply the 7-category taxonomy trees, and generate publication-ready plots.
+Check out the interactive `examples/la_fire_example.ipynb` notebook to see the full pipeline in action. It demonstrates how to initialize the data, execute spatial joins, apply the 7-category taxonomy trees, and generate visualizations.
 
 ```python
 import ember
 import pandas as pd
 
-# Load data (handles EPSG:4326 standardization)
-homes = ember.io.load_homes("data_sample/sample_homes.csv")
-zones = ember.io.load_fire_timeline("data_sample/Fire_Timeline_Sample/")
+# 1. Load data (handles EPSG:4326 standardization)
+homes = ember.io.load_homes("data/home.csv")
+zones = ember.io.load_fire_timeline("data/Fire_Timeline/")
 
-# Classify zones
+# 2. Classify zones spatially
 homes_with_zones = ember.zones.classify_zones(
-    homes, zones, buffer_distance=1000.0, order_status="Evacuation Order"
+    homes, zones, 
+    buffer_distance=2000.0, 
+    order_status="Evacuation Order",
+    warning_status="Evacuation Warning"
 )
 
-# Load stops/metrics
-metrics = ember.io.load_evacuation_metrics("data_sample/sample_evacuation_metrics.csv")
+# 3. Load pre-computed evacuation stops and metrics
+metrics = ember.io.load_evacuation_metrics("data/evacuation_metrics.csv")
 
-# Classify behavior taxonomy
+# 4. Classify behavior taxonomy
 metrics['Category'] = ember.behavior.classify(
     metrics,
     zone_col='ZoneType',
@@ -63,16 +58,34 @@ metrics['Category'] = ember.behavior.classify(
     order_start_col='OrderStart'
 )
 
-# Print Summary
+# 5. Print Summary & Plot Visualizations
 print(ember.behavior.summary(metrics['Category']))
+
+ember.metrics.plot_departure_curve(
+    df=metrics, 
+    start_ref=pd.Timestamp('2025-01-07 10:30:00'), 
+    group_col='ZoneType', 
+    title="Cumulative Departure by Zone"
+)
+
+ember.metrics.plot_evacuation_composition(
+    metrics, group_col='FireEvent', dual_panel=True, 
+    title="Evacuation Composition Breakdown"
+)
 ```
 
 ## Running Tests
 
-EMBER includes a comprehensive `pytest` suite ensuring all core algorithms boundary-match accurately:
+EMBER includes a `pytest` suite ensuring all core algorithms boundary-match accurately:
 
 ```bash
 pytest ember/tests/ -v
 ```
 
 This tests zone buffering and departure logic.
+
+## References
+
+1. Janfeshanaraghi, N., Sun, Y., Zhao, X., Singh, D., Moridpour, S., Bénichou, N., & Kuligowski, E. (2025). Generalized algorithm for inferring wildfire evacuation decisions using large-scale mobile location data. *SSRN*. https://doi.org/10.2139/ssrn.5854973
+2. Zhao, X., Xu, Y., Lovreglio, R., et al. (2022). Estimating Wildfire Evacuation Decision and Departure Timing Using Large-Scale GPS Data. *Transportation Research Part D: Transport and Environment*, 107, 103277. https://doi.org/10.1016/j.trd.2022.103277
+3. Recalde, A., Sameen, M., Zhang, X., & Zhao, X. (2025). GHOST: Grid-based Home detection via Stay-Time. *GitHub*. https://github.com/SERMOS-LAB/Grid-Based-Home-Detection
