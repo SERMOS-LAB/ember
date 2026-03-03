@@ -1,0 +1,440 @@
+"""
+Evacuation metrics and summary reporting.
+"""
+
+import pandas as pd
+import numpy as np
+
+
+def compliance_rate(
+    records: pd.DataFrame,
+    zone_col: str = "ZoneType",
+    category_col: str = "Category"
+) -> pd.DataFrame:
+    """
+    Compute evacuation compliance rates by zone type.
+    
+    Compliant behavior generally includes SELE, FEUO, FEUW, PERE.
+    Non-compliant is NER.
+    
+    Parameters
+    ----------
+    records : pd.DataFrame
+        Classified evacuation metrics.
+        
+    Returns
+    -------
+    pd.DataFrame
+        Rate of evacuation per zone type.
+    """
+    # Evacuees are categories 1,2,3,4,5. 
+    # NER is 6. UR is 7.
+    # Usually we count (Evacuated / Residing).
+    
+    evac_cats = ['SELE', 'PERE', 'FEUO', 'FEUW', 'SEFN']
+    
+    def calc_rate(group):
+        total = len(group)
+        # Exclude 'UR' from denominator if desired, but usually total = all valid inferred homes
+        # For strictness, let's keep all.
+        evacuated = group[category_col].isin(evac_cats).sum()
+        return pd.Series({
+            'Total_Residents': total,
+            'Evacuated': evacuated,
+            'Compliance_Rate': (evacuated / total) if total > 0 else 0.0
+        })
+        
+    return records.groupby(zone_col).apply(calc_rate, include_groups=False).reset_index()
+
+
+def dedi(
+    records: pd.DataFrame,
+    spatial_unit: str = "SubRegion"
+) -> pd.DataFrame:
+    """
+    Damage-Evacuation Disparity Index (DEDI).
+    
+    A novel metric comparing physical fire proximity/damage to actual evacuation rates.
+    For this prototype, it computes the micro-macro gap: difference between 
+    expected evacuation rate (based on Order timing) and actual.
+    
+    Parameters
+    ----------
+    records : pd.DataFrame
+        Needs spatial_unit column and 'Category'
+    """
+    # Simplified DEDI computation
+    # In full form, this compares against an external dataset (like Facebook Movement)
+    # Here we compute an internal DEDI: variance of compliance across regions inside the Order zone.
+    
+    order_only = records[records['ZoneType'] == 'Order']
+    if order_only.empty:
+        return pd.DataFrame()
+        
+    stats = compliance_rate(order_only, zone_col=spatial_unit, category_col="Category")
+    
+    # Calculate Disparity: how much each subregion deviates from the mean compliance
+    mean_rate = stats['Compliance_Rate'].mean()
+    stats['DEDI_Deviation'] = stats['Compliance_Rate'] - mean_rate
+    
+    # Standardize to 0-1 scale (absolute deviation relative to mean)
+    stats['DEDI'] = np.abs(stats['DEDI_Deviation']) / mean_rate if mean_rate > 0 else 0
+    
+    return stats
+
+
+def departure_curve(
+    records: pd.DataFrame,
+    start: str,
+    end: str,
+    freq: str = "1h",
+    zone: str = "Order"
+) -> pd.DataFrame:
+    """
+    Generate cumulative departure curves.
+    
+    Parameters
+    ----------
+    records : pd.DataFrame
+        Requires DepartureDate and ZoneType columns.
+        
+    Returns
+    -------
+    pd.DataFrame
+        Indexed by Datetime, column 'Cumulative_Pct'.
+    """
+    if 'DepartureDate' not in records.columns:
+        raise ValueError("records must contain DepartureDate")
+        
+    df = records.copy()
+    if zone:
+        df = df[df['ZoneType'] == zone]
+        
+    # Filter to valid departures
+    deps = pd.to_datetime(df['DepartureDate'].dropna())
+    
+    # Create time grid
+    grid = pd.date_range(start=start, end=end, freq=freq)
+    
+    # Count cumulative sum
+    # Sort deps
+    deps = deps.sort_values()
+    
+    # Searchsorted finds the index where each grid time would be inserted to maintain order
+    # It effectively gives the count of departures before or at each grid time
+    counts = np.searchsorted(deps.values, grid.values)
+    
+    total = len(df) # total residents in this zone
+    pct = (counts / total) * 100 if total > 0 else np.zeros_like(counts)
+    
+    out = pd.DataFrame({
+        'Datetime': grid,
+        'Cumulative_Count': counts,
+        'Cumulative_Pct': pct
+    }).set_index('Datetime')
+    
+    return out
+
+def plot_departure_curve(
+    curve_df: pd.DataFrame = None,
+    df: pd.DataFrame = None,
+    start_ref: pd.Timestamp = None,
+    order_offsets: dict = None,
+    night_shades: list = None,
+    group_col: str = None,
+    title: str = "Cumulative Departure Curve",
+    output_path: str = None
+):
+    """
+    Plot cumulative departure curves. 
+    Can either plot a pre-computed curve_df (simple) or a raw metrics df (complex with day/night shading).
+    """
+    try:
+        import matplotlib.pyplot as plt
+        import matplotlib.dates as mdates
+        import seaborn as sns
+        
+        fig, ax = plt.subplots(figsize=(10, 6))
+        
+        # Simple Mode
+        if curve_df is not None:
+            x = curve_df.index if isinstance(curve_df.index, pd.DatetimeIndex) else curve_df['Datetime']
+            y = curve_df['Cumulative_Pct']
+            ax.plot(x, y, linewidth=2, color='#F44336')
+            ax.xaxis.set_major_formatter(mdates.DateFormatter('%m-%d %H:%M'))
+            plt.xticks(rotation=45)
+            ax.set_xlabel('Date / Time', fontsize=12)
+        
+        # Complex Mode (Fig 10 style)
+        elif df is not None and start_ref is not None:
+            evacuees = df[df['Category'] != 'NER'].copy()
+            if 'DepartureDate' in evacuees.columns:
+                evacuees['DepartureDate'] = pd.to_datetime(evacuees['DepartureDate'])
+                evacuees['Hours_From_Start'] = (evacuees['DepartureDate'] - start_ref).dt.total_seconds() / 3600.0
+                subset = evacuees[(evacuees['Hours_From_Start'] >= 0) & (evacuees['Hours_From_Start'] <= 72)].copy()
+                
+                if group_col and group_col in subset.columns:
+                    groups = subset[group_col].unique()
+                else:
+                    subset['Group'] = 'All'
+                    groups = ['All']
+                    group_col = 'Group'
+                    
+                grand_total = len(subset)
+                if grand_total > 0:
+                    subset_sorted = subset.sort_values('Hours_From_Start')
+                    subset_sorted['cumulative_pct'] = (np.arange(grand_total) + 1) / grand_total * 100
+                    sns.lineplot(data=subset_sorted, x='Hours_From_Start', y='cumulative_pct', label="Overall", color='black', linestyle='--', linewidth=2, ax=ax)
+            
+                colors_map = {'Ordered Evacuee': 'red', 'Evacuee under Warning': 'orange', 'Shadow Evacuee': 'green', 'Self-Evacuee': 'blue', 'All': 'black'}
+                    
+                for g in groups:
+                    group_data = subset[subset[group_col] == g].sort_values('Hours_From_Start')
+                    if group_data.empty: continue
+                    group_data['cumulative_count'] = np.arange(len(group_data)) + 1
+                    group_data['pct_of_total'] = group_data['cumulative_count'] / grand_total * 100
+                    sns.lineplot(data=group_data, x='Hours_From_Start', y='pct_of_total', label=f"{g}", color=colors_map.get(g, None), ax=ax, linewidth=2)
+                    
+                if night_shades:
+                    for (start, end) in night_shades:
+                        ax.axvspan(start, end, alpha=0.10, color='grey', hatch='///')
+                        ax.text((start+end)/2, 2, "Night", ha='center', fontsize=8, color='black')
+            
+                if order_offsets:
+                    for k, offset in order_offsets.items():
+                        ax.axvline(offset, color='purple', linestyle=':', alpha=0.8)
+                        ax.text(offset + 0.5, 90, f"{k} Order", color='purple', fontsize=9, ha='left')
+                        
+                ax.set_xlabel('Hours from Fire Start', fontsize=12)
+                ax.set_xlim(0, 48)
+                ax.set_ylim(0, 100)
+                plt.legend()
+
+        ax.set_title(title, fontsize=14, weight='bold')
+        ax.set_ylabel('Cumulative Percentage (%)', fontsize=12)
+        plt.grid(True, linestyle='--', alpha=0.7)
+        plt.tight_layout()
+        
+        if output_path:
+            plt.savefig(output_path, dpi=300, bbox_inches='tight')
+            print(f"Plot saved to {output_path}")
+        else:
+            plt.show()
+            
+    except ImportError:
+        print("Warning: matplotlib/seaborn is required for plotting (`pip install matplotlib seaborn`).")
+
+
+def plot_evacuation_composition(
+    df: pd.DataFrame,
+    group_col: str = "FireEvent",
+    dual_panel: bool = False,
+    title: str = "Evacuation Composition",
+    output_path: str = None
+):
+    """
+    Generate stacked bar chart of evacuation compositions with embedded data table.
+    If dual_panel=True, plots two side-by-side charts: one with all categories, one excluding NER.
+    """
+    try:
+        import matplotlib.pyplot as plt
+        import seaborn as sns
+    except ImportError:
+        print("Warning: matplotlib and seaborn required.")
+        return
+
+    if df.empty or group_col not in df.columns:
+        print(f"Group column {group_col} not found or dataframe empty.")
+        return
+        
+    category_order = ['FEUO', 'FEUW', 'SELE', 'SEFN', 'PERE', 'NER', 'UR']
+    colors = {
+        'FEUO': '#d62728', 'FEUW': '#ff9896', 'SELE': '#ff7f0e',
+        'SEFN': '#2ca02c', 'PERE': '#9467bd', 'NER': '#bcbd22', 'UR': '#7f7f7f'
+    }
+    
+    def prep_data(subset, exclude_ner=False):
+        if exclude_ner:
+            subset = subset[subset['Category'] != 'NER']
+        props = subset.groupby([group_col, 'Category']).size().reset_index(name='count')
+        totals = subset.groupby(group_col)['ID'].count().reset_index(name='total')
+        props = pd.merge(props, totals, on=group_col)
+        props['pct'] = (props['count'] / props['total']) * 100
+        
+        pivot = props.pivot(index=group_col, columns='Category', values='pct').fillna(0)
+        pivot = pivot.reindex(columns=[c for c in category_order if c in pivot.columns])
+        
+        pivot_counts = props.pivot(index=group_col, columns='Category', values='count').fillna(0).astype(int)
+        pivot_counts = pivot_counts.reindex(columns=[c for c in category_order if c in pivot_counts.columns])
+        return props, pivot, pivot_counts
+
+    if dual_panel:
+        fig = plt.figure(figsize=(18, 8))
+        # Left side: All Categories
+        ax1 = plt.subplot2grid((4, 2), (0, 0), rowspan=3)
+        ax_table1 = plt.subplot2grid((4, 2), (3, 0))
+        
+        # Right side: Without NER
+        ax2 = plt.subplot2grid((4, 2), (0, 1), rowspan=3)
+        ax_table2 = plt.subplot2grid((4, 2), (3, 1))
+        
+        panels = [
+            (ax1, ax_table1, False, "Including NER (Non-Evacuating Resident)"),
+            (ax2, ax_table2, True, "Excluding NER (Evacuees Only)")
+        ]
+        fig.suptitle(title, fontsize=16, weight='bold')
+    else:
+        fig, (ax1, ax_table1) = plt.subplots(2, 1, figsize=(10, 8), gridspec_kw={'height_ratios': [3, 1]})
+        panels = [(ax1, ax_table1, False, title)]
+
+    for ax, ax_table, exclude_ner, p_title in panels:
+        props, pivot, pivot_counts = prep_data(df, exclude_ner)
+        
+        if exclude_ner:
+            sns.barplot(data=props, x=group_col, y='pct', hue='Category', palette=colors, ax=ax, edgecolor='black')
+            ax.set_ylim(0, 115)
+        else:
+            pivot.plot(kind='bar', stacked=True, ax=ax, color=[colors.get(c, '#333333') for c in pivot.columns], width=0.6)
+            ax.set_ylim(0, 100)
+            
+        ax.set_ylabel("Percentage (%)")
+        ax.set_title(p_title)
+        ax.tick_params(axis='x', rotation=0)
+        ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+        
+        table_data = []
+        row_labels = []
+        for region in pivot.index:
+            row = []
+            for cat in pivot.columns:
+                cnt = pivot_counts.loc[region, cat] if cat in pivot_counts.columns else 0
+                pct = pivot.loc[region, cat] if cat in pivot.columns else 0
+                row.append(f"{int(cnt)} ({pct:.1f}%)")
+            table_data.append(row)
+            row_labels.append(region)
+            
+        ax_table.axis('off')
+        tbl = ax_table.table(cellText=table_data, rowLabels=row_labels, colLabels=list(pivot.columns), cellLoc='center', loc='center')
+        tbl.auto_set_font_size(False)
+        tbl.set_fontsize(9)
+        tbl.scale(1.0, 1.4)
+        
+    plt.tight_layout()
+    
+    if output_path:
+        plt.savefig(output_path, dpi=300, bbox_inches='tight')
+        print(f"Plot saved to {output_path}")
+    else:
+        plt.show()
+    plt.close()
+    
+    if output_path:
+        plt.savefig(output_path, dpi=300, bbox_inches='tight')
+        print(f"Plot saved to {output_path}")
+    else:
+        plt.show()
+    plt.close()
+
+
+def _t2ll(x, y, level=14):
+    import math
+    map_size = 256 * (2 ** level)
+    n = math.pi - 2 * math.pi * y / map_size
+    lat_rad = math.atan(0.5 * (math.exp(n) - math.exp(-n)))
+    lat = lat_rad * 180 / math.pi
+    lon = 360 * x / map_size - 180
+    return lat, lon
+
+
+def _lat_lon_to_bing_tile(lat, lon, level=14):
+    import math
+    sin_lat = math.sin(lat * math.pi / 180)
+    x = ((lon + 180) / 360) * 256 * (2 ** level)
+    y = (0.5 - math.log((1 + sin_lat) / (1 - sin_lat)) / (4 * math.pi)) * 256 * (2 ** level)
+    return int(x), int(y)
+
+
+def plot_delay_map(
+    df: pd.DataFrame,
+    zones_gdf,
+    title: str = "Spatial Distribution of Delay",
+    output_path: str = None
+):
+    """
+    Plot spatial heatmap of total evacuation hours delayed using Bing Tiles.
+    zones_gdf should be a geopandas GeoDataFrame containing the fire boundaries.
+    """
+    try:
+        import matplotlib.pyplot as plt
+        import matplotlib.colors as mcolors
+        import geopandas as gpd
+        import contextily as ctx
+        from shapely.geometry import box
+    except ImportError:
+        print("Warning: matplotlib, geopandas, contextily required.")
+        return
+
+    if zones_gdf.crs != "EPSG:3857": 
+        zones_gdf = zones_gdf.to_crs("EPSG:3857")
+        
+    delayed_df = df[df['DelayHours'] > 0].copy() if 'DelayHours' in df.columns else pd.DataFrame()
+    if delayed_df.empty or 'home_lat_4326' not in delayed_df.columns:
+        print("Dataframe missing DelayHours or home coordinates.")
+        return
+    
+    delayed_df['tile_pos'] = delayed_df.apply(lambda r: _lat_lon_to_bing_tile(r['home_lat_4326'], r['home_lon_4326']), axis=1)
+    delayed_df['tile_x'] = delayed_df['tile_pos'].apply(lambda x: x[0])
+    delayed_df['tile_y'] = delayed_df['tile_pos'].apply(lambda x: x[1])
+    
+    delayed_df['grid_x'] = delayed_df['tile_x'] // 256
+    delayed_df['grid_y'] = delayed_df['tile_y'] // 256
+    
+    tile_stats = delayed_df.groupby(['grid_x', 'grid_y']).agg(total_delay=('DelayHours', 'sum'), user_count=('ID', 'count')).reset_index()
+    
+    def grid_to_poly(gx, gy, level=14):
+        px, py = gx * 256, gy * 256
+        lat1, lon1 = _t2ll(px, py, level)
+        lat2, lon2 = _t2ll(px + 256, py + 256, level)
+        return box(min(lon1, lon2), min(lat1, lat2), max(lon1, lon2), max(lat1, lat2))
+
+    geoms = [grid_to_poly(r.grid_x, r.grid_y) for r in tile_stats.itertuples()]
+    tiles_gdf = gpd.GeoDataFrame(tile_stats, geometry=geoms, crs="EPSG:4326").to_crs(epsg=3857)
+    
+    fig, ax = plt.subplots(figsize=(10, 10))
+    
+    try:
+        ctx.add_basemap(ax, zoom=13, source=ctx.providers.CartoDB.Positron)
+    except Exception:
+        pass 
+        
+    tiles_gdf.plot(
+        column='total_delay', ax=ax, cmap='inferno',
+        norm=mcolors.LogNorm(vmin=tiles_gdf['total_delay'].min(), vmax=tiles_gdf['total_delay'].max()),
+        alpha=0.9, edgecolor='none', legend=True,
+        legend_kwds={'label': "Total Delay (Hours) - Log Scale", 'orientation': "horizontal", 'shrink': 0.7, 'pad': 0.05}
+    )
+    
+    try:
+        fire_boundary = zones_gdf.buffer(10).union_all().boundary
+    except:
+        fire_boundary = zones_gdf.unary_union.boundary
+        
+    gpd.GeoSeries([fire_boundary], crs=zones_gdf.crs).plot(ax=ax, color='red', linewidth=2.0, zorder=10, label='Evacuation Order Zone')
+    
+    minx, miny, maxx, maxy = zones_gdf.total_bounds
+    buffer = 5000 
+    ax.set_xlim(minx - buffer, maxx + buffer)
+    ax.set_ylim(miny - buffer, maxy + buffer)
+    ax.set_title(title, fontsize=14)
+    ax.axis('off')
+    
+    plt.figtext(0.5, 0.02, "Red Outline: Evacuation Order Zone. Tiles outside = Shadow Evacuation Delay.\\nMap shows Total Delay (Hours) per 2.4km Block (Log Scale).", ha="center", fontsize=11, style='italic', backgroundcolor='white')
+    plt.tight_layout(rect=[0, 0.08, 1, 0.96])
+    
+    if output_path:
+        plt.savefig(output_path, dpi=300, bbox_inches='tight')
+        print(f"Plot saved to {output_path}")
+    else:
+        plt.show()
+    plt.close()
+
