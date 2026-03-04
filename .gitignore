@@ -8,10 +8,16 @@ __pycache__/
 *.json
 *.pkl
 *.shp
+*.shp.xml
 *.shx
 *.dbf
 *.geojson
 *.gpkg
+*.prj
+*.cpg
+*.sbn
+*.sbx
+*.xml
 
 # C extensions
 *.so

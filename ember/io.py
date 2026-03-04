@@ -218,3 +218,41 @@ def load_shards(shard_dir: Union[str, Path], bbox: Optional[Tuple[float, float, 
         combined['datetime'] = pd.to_datetime(combined['timestamp_ms'], unit='ms', utc=True)
         
     return combined
+
+
+def load_parcels(
+    path: Union[str, Path],
+    *,
+    type_col: str = "GENERALIZE",
+) -> gpd.GeoDataFrame:
+    """
+    Load county parcel / land-use data from Shapefile, GeoJSON, or GeoPackage.
+
+    Parameters
+    ----------
+    path : str or Path
+        Path to a spatial file containing parcel polygons.
+    type_col : str
+        Column in the file describing land-use type (default ``'UseCodeDes'``).
+
+    Returns
+    -------
+    gpd.GeoDataFrame
+        Parcel polygons normalised to EPSG:4326.
+    """
+    try:
+        gdf = gpd.read_file(path)
+    except Exception as e:
+        raise EmberInputError(f"Failed to load parcels from {path}: {e}")
+
+    if type_col not in gdf.columns:
+        raise EmberInputError(
+            f"Parcel data missing required column '{type_col}'. "
+            f"Available columns: {list(gdf.columns)}"
+        )
+
+    if gdf.crs is None or gdf.crs.to_epsg() != EPSG_WGS84:
+        gdf = gdf.to_crs(epsg=EPSG_WGS84)
+
+    return gdf
+

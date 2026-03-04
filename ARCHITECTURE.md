@@ -9,6 +9,7 @@ graph TD
     classDef io fill:#e3f2fd,stroke:#1e88e5,stroke-width:2px,color:#000
     classDef compute fill:#f3e5f5,stroke:#8e24aa,stroke-width:2px,color:#000
     classDef output fill:#e8f5e9,stroke:#43a047,stroke-width:2px,color:#000
+    classDef shared fill:#fff3e0,stroke:#e65100,stroke-width:2px,color:#000
     
     A[Raw GPS Pings]:::io --> B
     B[grid_based_home_detection]:::compute --> C[Homes DataFrame<br>EPSG:4326]:::output
@@ -17,15 +18,23 @@ graph TD
     C --> E[zones.classify_zones]:::compute
     E --> F[Homes with ZoneType<br>Order/Warning/Buffer/Outside]:::output
     
-    A --> G[departure.infer]:::compute
+    A --> ACT[activities.incremental_cluster]:::shared
+    ACT --> G[departure.infer<br>home_based / activity_based]:::compute
     C --> G
-    G --> H[Departure &amp; Return<br>Times]:::output
+    G --> H[Departure &amp; Return Times<br>+ Origin Type]:::output
     
     F --> I
     H --> I[behavior.classify]:::compute
     I --> J[7-Category Taxonomy<br>SELE, FEUO, PERE, etc.]:::output
     
-    J --> K[metrics.compliance_rate<br>metrics.dedi<br>metrics.plot_departure_curve]:::compute
+    A --> DES[destination.infer_destinations]:::compute
+    C --> DES
+    DES --> DLIST[Destination List<br>per Evacuee]:::output
+    DLIST --> DCLS[destination.classify_destinations<br>optional parcel data]:::compute
+    DCLS --> DTYPE[Destinations with<br>Land-Use Type]:::output
+    
+    J --> K[metrics.*]:::compute
+    DTYPE --> K
     K --> L[Summary Reports &amp; Plots]:::output
 ```
 
@@ -61,6 +70,16 @@ graph TD
 *   **Inputs**: The classified records DataFrame.
 *   **Outputs**: Aggregated DataFrames (Compliance Rates, DEDI) and matplotlib plots (`plot_departure_curve`, `plot_evacuation_composition`, `plot_temporal_heatmap`, `plot_return_timeline`, `plot_delay_map`).
 
+### 7. `ember.activities`
+**Purpose**: Shared incremental clustering primitive (Zhang et al. 2023; Nima et al. 2025) that powers both activity-based origin inference and destination identification.
+*   **Inputs**: Chronological GPS pings with `latitude`, `longitude`, `datetime`.
+*   **Outputs**: List of `ActivityCluster` namedtuples (centroid, start/end time, point count). Also provides `find_origin()` to determine if an evacuee departed from home or an external activity location.
+
+### 8. `ember.destination`
+**Purpose**: Infers evacuation destinations from nightly stops and optionally classifies them by land-use type (Cova et al. 2024).
+*   **Inputs**: Nightly stop records (from `pipeline.compute_stops`) and home locations. Optionally, parcel/land-use GeoDataFrame.
+*   **Outputs**: Per-evacuee destination list with distances. With parcel data: destination type classification (residential, hotel, commercial, public, road, other).
+
 ## Configurable Hyperparameters
 
 EMBER is designed to give researchers full control over the physical and temporal thresholds that define an evacuation. Every core function exposes these as keyword arguments. 
@@ -72,6 +91,10 @@ Here are the key hyperparameters you can manipulate:
 *   **Residency Thresholds (`min_nights`, `min_stay_time`)**: In `ghost.py`, you can strictly define who counts as a resident vs. a transient visitor (defaults strictly to `14` nights).
 *   **Trip Detection Radii (`home_radius`, `away_radius`)**: In `ember.departure.infer`, define what physical distance constitutes "leaving the neighborhood" (default `away_radius=1000.0`).
 *   **Nighttime Windows (`nighttime_start`, `nighttime_end`)**: In `ghost.py`, define when a user must be present to count as dwelling at home.
+*   **Activity Clustering Radius (`R_a`)**: In `ember.activities.incremental_cluster`, the spatial threshold for grouping GPS pings into an activity (default `200.0` metres).
+*   **Activity Duration Threshold (`T_a`)**: Minimum stay at a location to qualify as an activity (default `5min`).
+*   **Destination Merge Distance (`merge_distance_km`)**: In `ember.destination.infer_destinations`, successive overnight stops within this distance are merged into one destination (default `0.4` km).
+*   **Home Buffer (`home_buffer_m`)**: In `ember.destination.infer_destinations`, stops within this distance of home are excluded (default `400` m).
 
 ```mermaid
 sequenceDiagram

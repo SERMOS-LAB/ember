@@ -23,10 +23,11 @@ def test_infer_departure_return():
         
     df = pd.DataFrame(records)
     
-    t_dep, t_ret = infer(df, away_radius=1000.0)
+    t_dep, t_ret, origin_type = infer(df, away_radius=1000.0)
     
     assert t_dep is not None
     assert t_ret is not None
+    assert origin_type == "home"
     
     # Departure should be on the 3rd day (2025-01-03 12:00)
     assert t_dep.date() == pd.Timestamp("2025-01-03").date()
