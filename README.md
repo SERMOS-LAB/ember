@@ -27,14 +27,19 @@ EMBER is designed to abstract away the boilerplate CRS transformations and spati
 *   **`ember.departure`**: Infers $T_{dep}$ and $T_{ret}$ from raw GPS sequences by detecting extended trips away from the proxy home.
 *   **`ember.metrics`**: Generates high-level aggregated metrics and publication-ready visualizations, including Evacuation Compliance Rates, cumulative departure curves, temporal heatmaps, return behavior timelines, spatial delay maps, and the micro-macro DEDI (Damage-Evacuation Disparity Index).
 *   **`ember.activities`**: Shared incremental clustering primitive that powers activity-based origin detection and destination inference.
-*   **`ember.destination`**: Infers evacuation destinations from nightly stop data and optionally classifies them by land-use type via county parcel spatial join.
+*   **`ember.mobility.clustering`**: General-purpose incremental clustering engine with configurable spatial/temporal/gap thresholds, plus optional cluster event streams for routing workflows.
+*   **`ember.mobility.trip_chain`**: Intermediate-stop tracking and ordered stop-chain extraction with role labels (`home`, `intermediate`, `destination`, `overnight`, `return`).
+*   **`ember.destination`**: Chain-first destination inference (with backward-compatible nightly-stop support) and optional land-use classification via parcel spatial join.
+*   **`ember.contracts`**: Canonical column specs and lightweight validators/canonicalizers for pings, homes, trip chains, and destinations.
+*   **`ember.mobility.routes`**: Route-model integration interfaces (`build_trip_legs`, `infer_route_candidates`) with pluggable strategy callbacks and neutral defaults.
 
 ## Getting Started
 
 The best way to explore EMBER's capabilities is through the **example notebooks** in the `examples/` directory:
 
 *   **`01_evacuation_behavior.ipynb`** — End-to-end pipeline: home inference → zone classification → departure timing → 7-category behavioral taxonomy → metrics & visualizations. Applied to the January 2025 LA Wildfires (Palisades & Eaton fires).
-*   **`02_destination_origin.ipynb`** — Destination inference, distance analysis, K-S tests, temporal destination evolution, O-D maps, activity-based origin detection, and return behavior analysis.
+*   **`02_destination_origin.ipynb`** — Chain-first destination inference, distance analysis, K-S tests, temporal destination evolution, O-D maps, activity-based origin detection, and return behavior analysis.
+    It demonstrates trip-chain extraction + role-aware destination logic.
 
 Here is a minimal code snippet to get started:
 
@@ -86,7 +91,7 @@ ember.metrics.plot_evacuation_composition(
 EMBER includes a `pytest` suite ensuring all core algorithms boundary-match accurately:
 
 ```bash
-pytest ember/tests/ -v
+pytest ember/ember/tests/ -v
 ```
 
 This tests zone buffering, departure logic, activity clustering, and destination inference.

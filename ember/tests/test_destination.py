@@ -111,6 +111,33 @@ class TestInferDestinations:
         assert len(result) == 2
         assert set(result["ID"]) == {"A", "B"}
 
+    def test_chain_first_destination_inference(self):
+        chain = pd.DataFrame(
+            [
+                {
+                    "user_id": "A",
+                    "seq_idx": 1,
+                    "stop_id": 1,
+                    "start_ts": "2025-01-07 21:00:00+00:00",
+                    "end_ts": "2025-01-07 23:00:00+00:00",
+                    "dwell_s": 7200,
+                    "lat": 34.10,
+                    "lon": -118.30,
+                    "distance_from_home_m": 8000.0,
+                    "distance_from_prev_m": np.nan,
+                    "is_overnight": True,
+                    "stop_role": "overnight",
+                }
+            ]
+        )
+        homes = _make_homes(
+            [{"ID": "A", "home_lat_4326": 34.05, "home_lon_4326": -118.25}]
+        )
+        result = infer_destinations(chain, homes)
+        assert len(result) == 1
+        assert result.iloc[0]["ID"] == "A"
+        assert result.iloc[0]["source_role"] == "trip_chain"
+
 
 # ---------------------------------------------------------------------------
 # classify_destinations — without parcel data

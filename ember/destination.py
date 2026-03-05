@@ -20,6 +20,7 @@ except ImportError:
     gpd = None
 
 from .activities import haversine_m
+from .contracts import TRIP_CHAIN_SCHEMA, validate_columns
 
 
 # ---------------------------------------------------------------------------
@@ -50,6 +51,8 @@ def infer_destinations(
     id_col: str = "ID",
     home_lat_col: str = "home_lat_4326",
     home_lon_col: str = "home_lon_4326",
+    include_intermediate: bool = False,
+    include_return: bool = False,
 ) -> pd.DataFrame:
     """
     Infer evacuation destinations from nightly stop data.
@@ -88,7 +91,19 @@ def infer_destinations(
         Columns: ``ID``, ``dest_lat``, ``dest_lon``, ``dest_date``,
         ``eu_distance_km``, ``dest_order``.
     """
-    # Merge home coordinates onto stops
+    # Chain-first path (preferred)
+    chain_required = set(TRIP_CHAIN_SCHEMA.required_columns)
+    if chain_required.issubset(set(stops.columns)):
+        return infer_destinations_from_chain(
+            stops,
+            homes,
+            merge_distance_km=merge_distance_km,
+            home_buffer_m=home_buffer_m,
+            include_intermediate=include_intermediate,
+            include_return=include_return,
+        )
+
+    # Backward-compatible stop table path
     home_cols = [id_col, home_lat_col, home_lon_col]
     if not all(c in homes.columns for c in home_cols):
         raise ValueError(
@@ -96,27 +111,37 @@ def infer_destinations(
             f"Found: {list(homes.columns)}"
         )
 
-    df = stops.merge(
-        homes[[id_col, home_lat_col, home_lon_col]].drop_duplicates(subset=[id_col]),
-        on=id_col,
-        how="left",
-    )
+    home_lookup = homes[[id_col, home_lat_col, home_lon_col]].drop_duplicates(subset=[id_col])
+    df = stops.copy()
+    if "user_id" in df.columns and id_col not in df.columns:
+        df = df.rename(columns={"user_id": id_col})
+    if "lat" in df.columns and lat_col not in df.columns:
+        df = df.rename(columns={"lat": lat_col})
+    if "lon" in df.columns and lon_col not in df.columns:
+        df = df.rename(columns={"lon": lon_col})
+    if "start_ts" in df.columns and date_col not in df.columns:
+        df[date_col] = pd.to_datetime(df["start_ts"], utc=True).dt.date.astype(str)
+    if "dwell_s" in df.columns and duration_col not in df.columns:
+        df[duration_col] = pd.to_numeric(df["dwell_s"], errors="coerce") / 60.0
 
-    # --- 1. Nighttime filter (if we have timestamps, not just dates) ---
-    # If stop data only has dates (no hour), skip the hourly filter
-    has_duration = duration_col in df.columns
+    if "stop_role" in df.columns:
+        if include_intermediate:
+            allowed = ["intermediate", "overnight", "destination"]
+        else:
+            allowed = ["overnight", "destination"]
+        if include_return:
+            allowed.append("return")
+        df = df[df["stop_role"].isin(allowed)]
+    df = df.merge(home_lookup, on=id_col, how="left")
 
-    # --- 2. Pick longest stop per night per user ---
-    if has_duration:
+    has_duration = duration_col in df.columns and df[duration_col].notna().any()
+    if has_duration and date_col in df.columns:
         idx = df.groupby([id_col, date_col])[duration_col].idxmax()
         df = df.loc[idx].reset_index(drop=True)
-    else:
-        # If no duration, just deduplicate per user per night
-        df = df.drop_duplicates(subset=[id_col, date_col], keep="first").reset_index(
-            drop=True
-        )
+    elif date_col in df.columns:
+        df = df.drop_duplicates(subset=[id_col, date_col], keep="first").reset_index(drop=True)
 
-    # --- 3. Filter stops within home buffer ---
+    # Filter stops within home buffer
     df["_dist_home_m"] = df.apply(
         lambda r: haversine_m(
             r[home_lat_col], r[home_lon_col], r[lat_col], r[lon_col]
@@ -130,7 +155,7 @@ def infer_destinations(
             columns=["ID", "dest_lat", "dest_lon", "dest_date", "eu_distance_km", "dest_order"]
         )
 
-    # --- 4. Merge close successive stops ---
+    # Merge close successive stops
     results = []
     for uid, grp in df.groupby(id_col):
         grp = grp.sort_values(date_col).reset_index(drop=True)
@@ -154,8 +179,6 @@ def infer_destinations(
                         "date": grp.loc[i, date_col],
                     }
                 )
-            # else: merge (keep existing destination, skip this stop)
-
         for order, dest in enumerate(destinations, start=1):
             eu_km = _haversine_km(
                 grp.loc[0, home_lat_col],
@@ -171,9 +194,96 @@ def infer_destinations(
                     "dest_date": dest["date"],
                     "eu_distance_km": round(eu_km, 3),
                     "dest_order": order,
+                    "source_role": "intermediate_or_overnight" if include_intermediate else "overnight",
                 }
             )
 
+    return pd.DataFrame(results)
+
+
+def infer_destinations_from_chain(
+    trip_chain: pd.DataFrame,
+    homes: pd.DataFrame,
+    *,
+    merge_distance_km: float = 0.4,
+    home_buffer_m: float = 400.0,
+    include_intermediate: bool = False,
+    include_return: bool = False,
+    id_col: str = "ID",
+    home_lat_col: str = "home_lat_4326",
+    home_lon_col: str = "home_lon_4326",
+) -> pd.DataFrame:
+    """Infer destinations directly from canonical trip-chain artifacts."""
+    if trip_chain.empty:
+        return pd.DataFrame(
+            columns=["ID", "dest_lat", "dest_lon", "dest_date", "eu_distance_km", "dest_order"]
+        )
+    validate_columns(trip_chain, TRIP_CHAIN_SCHEMA)
+    home_cols = [id_col, home_lat_col, home_lon_col]
+    if not all(c in homes.columns for c in home_cols):
+        raise ValueError(
+            f"homes must contain columns {home_cols}. "
+            f"Found: {list(homes.columns)}"
+        )
+
+    allowed_roles = {"overnight", "destination"}
+    if include_intermediate:
+        allowed_roles.add("intermediate")
+    if include_return:
+        allowed_roles.add("return")
+
+    home_lookup = homes[[id_col, home_lat_col, home_lon_col]].drop_duplicates(subset=[id_col])
+    df = trip_chain.copy().rename(columns={"user_id": id_col, "lat": "dest_lat", "lon": "dest_lon"})
+    df = df[df["stop_role"].isin(allowed_roles)].copy()
+    if df.empty:
+        return pd.DataFrame(
+            columns=["ID", "dest_lat", "dest_lon", "dest_date", "eu_distance_km", "dest_order"]
+        )
+
+    df["dest_date"] = pd.to_datetime(df["start_ts"], utc=True).dt.date.astype(str)
+    df = df.merge(home_lookup, on=id_col, how="left")
+
+    # Keep stops beyond home buffer
+    df["_dist_home_m"] = df.apply(
+        lambda r: haversine_m(r[home_lat_col], r[home_lon_col], r["dest_lat"], r["dest_lon"]),
+        axis=1,
+    )
+    df = df[df["_dist_home_m"] > home_buffer_m].copy()
+    if df.empty:
+        return pd.DataFrame(
+            columns=["ID", "dest_lat", "dest_lon", "dest_date", "eu_distance_km", "dest_order"]
+        )
+
+    # Role precedence for choosing representative stop per date
+    role_rank = {"overnight": 3, "destination": 2, "intermediate": 1, "return": 0}
+    df["_role_rank"] = df["stop_role"].map(role_rank).fillna(0)
+    df = df.sort_values([id_col, "dest_date", "_role_rank", "dwell_s"], ascending=[True, True, False, False])
+    df = df.drop_duplicates(subset=[id_col, "dest_date"], keep="first").reset_index(drop=True)
+
+    results = []
+    for uid, grp in df.groupby(id_col):
+        grp = grp.sort_values("dest_date").reset_index(drop=True)
+        destinations = [{"lat": grp.loc[0, "dest_lat"], "lon": grp.loc[0, "dest_lon"], "date": grp.loc[0, "dest_date"]}]
+        for i in range(1, len(grp)):
+            prev = destinations[-1]
+            d_km = _haversine_km(prev["lat"], prev["lon"], grp.loc[i, "dest_lat"], grp.loc[i, "dest_lon"])
+            if d_km > merge_distance_km:
+                destinations.append(
+                    {"lat": grp.loc[i, "dest_lat"], "lon": grp.loc[i, "dest_lon"], "date": grp.loc[i, "dest_date"]}
+                )
+        for order, dest in enumerate(destinations, start=1):
+            eu_km = _haversine_km(grp.loc[0, home_lat_col], grp.loc[0, home_lon_col], dest["lat"], dest["lon"])
+            results.append(
+                {
+                    "ID": uid,
+                    "dest_lat": dest["lat"],
+                    "dest_lon": dest["lon"],
+                    "dest_date": dest["date"],
+                    "eu_distance_km": round(eu_km, 3),
+                    "dest_order": order,
+                    "source_role": "trip_chain",
+                }
+            )
     return pd.DataFrame(results)
 
 

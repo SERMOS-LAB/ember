@@ -11,12 +11,17 @@ Implements an incremental clustering method used by both:
 
 from __future__ import annotations
 
-import math
 from collections import namedtuple
-from typing import List, Optional, Tuple
+from typing import List, Tuple
 
-import numpy as np
 import pandas as pd
+
+from .mobility.clustering import (
+    IncrementalClusterConfig,
+    cluster_points,
+    haversine_m,
+)
+from .mobility.trip_chain import build_trip_chain_for_user
 
 
 # ---------------------------------------------------------------------------
@@ -30,24 +35,7 @@ ActivityCluster = namedtuple(
 
 
 # ---------------------------------------------------------------------------
-# Haversine utility (metres)
-# ---------------------------------------------------------------------------
-
-def haversine_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
-    """Great-circle distance between two (lat, lon) points in **metres**."""
-    R = 6_371_000  # Earth radius in metres
-    phi1, phi2 = math.radians(lat1), math.radians(lat2)
-    dphi = math.radians(lat2 - lat1)
-    dlam = math.radians(lon2 - lon1)
-    a = (
-        math.sin(dphi / 2) ** 2
-        + math.cos(phi1) * math.cos(phi2) * math.sin(dlam / 2) ** 2
-    )
-    return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
-
-
-# ---------------------------------------------------------------------------
-# Core incremental clustering
+# Core incremental clustering (compatibility wrapper)
 # ---------------------------------------------------------------------------
 
 def incremental_cluster(
@@ -90,72 +78,27 @@ def incremental_cluster(
     list[ActivityCluster]
         Chronologically ordered list of identified activity clusters.
     """
-    if pings.empty:
-        return []
-
-    T_a_td = pd.Timedelta(T_a)
-
-    # Ensure sorted
-    df = pings.sort_values(time_col).reset_index(drop=True)
-    lats = df[lat_col].values
-    lons = df[lon_col].values
-    times = df[time_col]
-    if not pd.api.types.is_datetime64_any_dtype(times):
-        times = pd.to_datetime(times, format="mixed", utc=True)
-    elif times.dt.tz is None:
-        times = times.dt.tz_localize("UTC")
-    else:
-        times = times.dt.tz_convert("UTC")
-
-    clusters: List[ActivityCluster] = []
-
-    # Running cluster state
-    c_lats = [lats[0]]
-    c_lons = [lons[0]]
-    c_start = times.iloc[0]
-    c_end = times.iloc[0]
-
-    for i in range(1, len(df)):
-        centroid_lat = np.mean(c_lats)
-        centroid_lon = np.mean(c_lons)
-        d = haversine_m(centroid_lat, centroid_lon, lats[i], lons[i])
-
-        if d <= R_a:
-            # Add to current cluster
-            c_lats.append(lats[i])
-            c_lons.append(lons[i])
-            c_end = times.iloc[i]
-        else:
-            # Close current cluster if duration qualifies
-            if c_end - c_start >= T_a_td:
-                clusters.append(
-                    ActivityCluster(
-                        centroid_lat=np.mean(c_lats),
-                        centroid_lon=np.mean(c_lons),
-                        start_time=c_start,
-                        end_time=c_end,
-                        n_points=len(c_lats),
-                    )
-                )
-            # Start new cluster
-            c_lats = [lats[i]]
-            c_lons = [lons[i]]
-            c_start = times.iloc[i]
-            c_end = times.iloc[i]
-
-    # Final cluster
-    if c_end - c_start >= T_a_td:
-        clusters.append(
-            ActivityCluster(
-                centroid_lat=np.mean(c_lats),
-                centroid_lon=np.mean(c_lons),
-                start_time=c_start,
-                end_time=c_end,
-                n_points=len(c_lats),
-            )
+    config = IncrementalClusterConfig(
+        radius_m=R_a,
+        min_dwell_s=pd.Timedelta(T_a).total_seconds(),
+    )
+    summaries = cluster_points(
+        pings,
+        lat_col=lat_col,
+        lon_col=lon_col,
+        time_col=time_col,
+        config=config,
+    )
+    return [
+        ActivityCluster(
+            centroid_lat=s.centroid_lat,
+            centroid_lon=s.centroid_lon,
+            start_time=s.start_time,
+            end_time=s.end_time,
+            n_points=s.n_points,
         )
-
-    return clusters
+        for s in summaries
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -254,57 +197,49 @@ def find_origin(
             if d <= home_radius:
                 return home_lat, home_lon, "home"
 
-    # ---- Step 2: Cluster pre-fire pings to find activity location ----
-    # Use pings from up to 12 hours before fire start
+    # ---- Step 2: Build pre-fire stop chain and identify active stop ----
     lookback = fire_ts - pd.Timedelta("12h")
     pre_fire = df[(df[time_col] >= lookback) & (df[time_col] <= fire_ts)]
 
     if pre_fire.empty:
-        # No pre-fire data → default to home
         return home_lat, home_lon, "home"
 
-    clusters = incremental_cluster(
-        pre_fire, R_a=R_a, T_a=T_a,
-        lat_col=lat_col, lon_col=lon_col, time_col=time_col
+    chain = build_trip_chain_for_user(
+        pre_fire,
+        user_id="user",
+        home_lat=home_lat,
+        home_lon=home_lon,
+        lat_col=lat_col,
+        lon_col=lon_col,
+        time_col=time_col,
+        clustering_config=IncrementalClusterConfig(
+            radius_m=R_a,
+            min_dwell_s=pd.Timedelta(T_a).total_seconds(),
+        ),
+        home_radius_m=home_radius,
     )
-
-    if not clusters:
+    if chain.empty:
         return home_lat, home_lon, "home"
 
-    # Find cluster that contains fire_start, or the last cluster before it
-    best_cluster = None
-    for c in clusters:
-        c_start = pd.Timestamp(c.start_time)
-        c_end = pd.Timestamp(c.end_time)
-        if c_start.tzinfo is None:
-            c_start = c_start.tz_localize("UTC")
-        if c_end.tzinfo is None:
-            c_end = c_end.tz_localize("UTC")
-
+    chain = chain.sort_values("start_ts").reset_index(drop=True)
+    candidate = None
+    for _, row in chain.iterrows():
+        c_start = pd.Timestamp(row["start_ts"])
+        c_end = pd.Timestamp(row["end_ts"])
         if c_start <= fire_ts <= c_end:
-            # Evacuee was in this cluster at fire start
-            best_cluster = c
+            candidate = row
             break
-        elif c_end <= fire_ts:
-            # This cluster ended before fire — keep as candidate
-            best_cluster = c
+        if c_end <= fire_ts:
+            candidate = row
 
-    if best_cluster is None:
+    if candidate is None:
         return home_lat, home_lon, "home"
 
-    # ---- Step 3: Distance sanity check ----
     d_from_home = haversine_m(
         home_lat, home_lon,
-        best_cluster.centroid_lat, best_cluster.centroid_lon
+        float(candidate["lat"]), float(candidate["lon"]),
     )
-
-    if d_from_home <= home_radius:
-        # The "activity" is actually at home
+    if d_from_home <= home_radius or d_from_home > max_origin_distance_m:
         return home_lat, home_lon, "home"
-
-    if d_from_home > max_origin_distance_m:
-        # Too far from home — likely a travel/transit artifact
-        return home_lat, home_lon, "home"
-
-    return best_cluster.centroid_lat, best_cluster.centroid_lon, "activity"
+    return float(candidate["lat"]), float(candidate["lon"]), "activity"
 

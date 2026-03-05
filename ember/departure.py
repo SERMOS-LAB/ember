@@ -6,6 +6,7 @@ import pandas as pd
 from typing import Optional, Tuple, Literal
 
 from .activities import find_origin as _find_origin, haversine_m
+from .contracts import TRIP_CHAIN_SCHEMA, validate_columns
 
 
 def _get_consecutive_intervals(dates: list) -> list:
@@ -41,6 +42,7 @@ def infer(
     method: Literal["home_based", "activity_based", "auto"] = "home_based",
     home_lat: Optional[float] = None,
     home_lon: Optional[float] = None,
+    trip_chain: Optional[pd.DataFrame] = None,
 ) -> Tuple[Optional[pd.Timestamp], Optional[pd.Timestamp], str]:
     """
     Infer departure and return times for a single resident from raw pings.
@@ -79,12 +81,20 @@ def infer(
         ``'home'`` or ``'activity'``.  Returns ``(None, None, 'home')``
         if no evacuation detected.
     """
+    if trip_chain is not None and not trip_chain.empty:
+        return infer_from_trip_chain(
+            trip_chain,
+            away_radius=away_radius,
+            order_start=order_start,
+        )
+
     origin_type = "home"
+    distance_col = "distance_to_home"
 
     # ---- Activity-based origin resolution ----
     if method in ("activity_based", "auto"):
         if home_lat is not None and home_lon is not None and order_start is not None:
-            _, _, origin_type = _find_origin(
+            o_lat, o_lon, origin_type = _find_origin(
                 pings,
                 home_lat,
                 home_lon,
@@ -95,25 +105,21 @@ def infer(
             if method == "activity_based" or origin_type == "activity":
                 # Compute distance_to_origin for each ping
                 if "latitude" in pings.columns and "longitude" in pings.columns:
-                    o_lat, o_lon, origin_type = _find_origin(
-                        pings,
-                        home_lat,
-                        home_lon,
-                        fire_start=order_start,
-                        home_radius=home_radius,
-                    )
                     pings = pings.copy()
-                    pings["distance_to_home"] = pings.apply(
+                    distance_col = "distance_to_origin"
+                    pings[distance_col] = pings.apply(
                         lambda r: haversine_m(o_lat, o_lon, r["latitude"], r["longitude"]),
                         axis=1,
                     )
 
     # ---- Standard home-based departure inference ----
-    if pings.empty or "distance_to_home" not in pings.columns:
+    if pings.empty:
         return None, None, origin_type
-        
+    if distance_col not in pings.columns:
+        return None, None, origin_type
+
     # Identify away pings
-    away_pings = pings[pings["distance_to_home"] > away_radius].copy()
+    away_pings = pings[pings[distance_col] > away_radius].copy()
     if away_pings.empty:
         return None, None, origin_type
         
@@ -157,6 +163,52 @@ def infer(
     ret_time = away_pings.loc[mask_end, "datetime"].max()
     
     return dep_time, ret_time, origin_type
+
+
+def infer_from_trip_chain(
+    trip_chain: pd.DataFrame,
+    *,
+    away_radius: float = 1000.0,
+    order_start: Optional[pd.Timestamp] = None,
+) -> Tuple[Optional[pd.Timestamp], Optional[pd.Timestamp], str]:
+    """Infer departure/return using canonical trip-chain artifacts."""
+    if trip_chain.empty:
+        return None, None, "home"
+    validate_columns(trip_chain, TRIP_CHAIN_SCHEMA)
+
+    chain = trip_chain.sort_values("start_ts").reset_index(drop=True).copy()
+    away_roles = {"intermediate", "overnight", "destination"}
+    away = chain[
+        chain["stop_role"].isin(away_roles)
+        & (pd.to_numeric(chain["distance_from_home_m"], errors="coerce") > away_radius)
+    ].copy()
+    if away.empty:
+        return None, None, "home"
+
+    away["away_date"] = pd.to_datetime(away["start_ts"], utc=True).dt.date
+    intervals = _get_consecutive_intervals(away["away_date"].tolist())
+    if not intervals:
+        return None, None, "home"
+
+    selected = None
+    if order_start is not None:
+        ref_date = pd.Timestamp(order_start).date()
+        for interval in intervals:
+            if interval[-1] >= ref_date:
+                selected = interval
+                break
+    else:
+        selected = intervals[0]
+
+    if not selected or selected[-1] <= selected[0]:
+        return None, None, "home"
+
+    dep = away[away["away_date"] == selected[0]]["start_ts"].min()
+    ret = away[away["away_date"] == selected[-1]]["end_ts"].max()
+
+    # Chain-first default: departure origin can be activity by construction.
+    origin_type = "activity"
+    return pd.Timestamp(dep), pd.Timestamp(ret), origin_type
 
 
 def delay_hours(

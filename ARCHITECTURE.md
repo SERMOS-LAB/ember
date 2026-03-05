@@ -18,8 +18,10 @@ graph TD
     C --> E[zones.classify_zones]:::compute
     E --> F[Homes with ZoneType<br>Order/Warning/Buffer/Outside]:::output
     
-    A --> ACT[activities.incremental_cluster]:::shared
-    ACT --> G[departure.infer<br>home_based / activity_based]:::compute
+    A --> CLU[mobility.clustering<br>cluster_points / event_stream]:::shared
+    A --> CHAIN[mobility.trip_chain<br>build_trip_chain]:::shared
+    C --> CHAIN
+    CHAIN --> G[departure.infer<br>chain-first or legacy]:::compute
     C --> G
     G --> H[Departure &amp; Return Times<br>+ Origin Type]:::output
     
@@ -27,7 +29,7 @@ graph TD
     H --> I[behavior.classify]:::compute
     I --> J[7-Category Taxonomy<br>SELE, FEUO, PERE, etc.]:::output
     
-    A --> DES[destination.infer_destinations]:::compute
+    CHAIN --> DES[destination.infer_destinations<br>chain-first]:::compute
     C --> DES
     DES --> DLIST[Destination List<br>per Evacuee]:::output
     DLIST --> DCLS[destination.classify_destinations<br>optional parcel data]:::compute
@@ -70,15 +72,35 @@ graph TD
 *   **Inputs**: The classified records DataFrame.
 *   **Outputs**: Aggregated DataFrames (Compliance Rates, DEDI) and matplotlib plots (`plot_departure_curve`, `plot_evacuation_composition`, `plot_temporal_heatmap`, `plot_return_timeline`, `plot_delay_map`).
 
-### 7. `ember.activities`
-**Purpose**: Shared incremental clustering primitive that powers both activity-based origin inference and destination identification.
+### 7. `ember.mobility.clustering`
+**Purpose**: Generalized, reusable incremental clustering engine shared by all mobility modules.
 *   **Inputs**: Chronological GPS pings with `latitude`, `longitude`, `datetime`.
-*   **Outputs**: List of `ActivityCluster` namedtuples (centroid, start/end time, point count). Also provides `find_origin()` to determine if an evacuee departed from home or an external activity location.
+*   **Outputs**: Stable `ClusterSummary` records (cluster id, centroid, start/end, dwell, point count) and optional engine events for streaming use.
 
-### 8. `ember.destination`
-**Purpose**: Infers evacuation destinations from nightly stops and optionally classifies them by land-use type.
-*   **Inputs**: Nightly stop records (from `pipeline.compute_stops`) and home locations. Optionally, parcel/land-use GeoDataFrame.
+### 8. `ember.mobility.trip_chain`
+**Purpose**: Extracts full stop chains with intermediate-stop tracking and role labeling.
+*   **Inputs**: User pings and optional home anchors.
+*   **Outputs**: Ordered stop sequences with `seq_idx`, stop location/time/dwell, distance-from-home/previous-stop, and `stop_role` (`home`, `intermediate`, `destination`, `overnight`, `return`).
+
+### 9. `ember.contracts`
+**Purpose**: Canonical schema contracts and lightweight validators used across mobility/departure/destination flow.
+*   **Inputs**: DataFrames for pings, homes, trip chains, and destinations.
+*   **Outputs**: Validation/canonicalization helpers (`validate_columns`, `canonicalize_columns`), plus reusable schema specs.
+
+### 10. `ember.activities`
+**Purpose**: Backward-compatible activity APIs built on top of the shared clustering/trip-chain layer.
+*   **Inputs**: Chronological GPS pings with `latitude`, `longitude`, `datetime`.
+*   **Outputs**: `ActivityCluster` namedtuples and `find_origin()` for home-vs-activity origin resolution.
+
+### 11. `ember.destination`
+**Purpose**: Infers evacuation destinations from stop chains or nightly-stop tables and optionally classifies them by land-use type.
+*   **Inputs**: Stop-chain or nightly stop records and home locations. Optionally, parcel/land-use GeoDataFrame.
 *   **Outputs**: Per-evacuee destination list with distances. With parcel data: destination type classification (residential, hotel, commercial, public, road, other).
+
+### 12. `ember.mobility.routes`
+**Purpose**: Route-model integration interfaces built on top of stop-chain outputs.
+*   **Inputs**: Canonical trip-chain artifacts.
+*   **Outputs**: Sequential trip legs and route-candidate hooks via pluggable strategy callbacks (neutral default if no strategy is provided).
 
 ## Configurable Hyperparameters
 
@@ -93,11 +115,14 @@ Here are the key hyperparameters you can manipulate:
 *   **Nighttime Windows (`nighttime_start`, `nighttime_end`)**: In `ghost.py`, define when a user must be present to count as dwelling at home.
 *   **Activity Clustering Radius (`R_a`)**: In `ember.activities.incremental_cluster`, the spatial threshold for grouping GPS pings into an activity (default `200.0` metres).
 *   **Activity Duration Threshold (`T_a`)**: Minimum stay at a location to qualify as an activity (default `5min`).
+*   **Max Ping Gap (`max_gap_s`)**: In `ember.mobility.clustering.IncrementalClusterConfig`, splits clusters when temporal gaps are too large.
+*   **Trip-Chain Destination Dwell (`destination_min_dwell_s`)**: Minimum dwell to promote an away stop from `intermediate` to `destination`.
+*   **Trip-Chain Merge Rules (`merge_nearby_stops`, `merge_distance_m`, `merge_gap_s`)**: Controls split/merge behavior for adjacent stops under GPS jitter.
 *   **Destination Merge Distance (`merge_distance_km`)**: In `ember.destination.infer_destinations`, successive overnight stops within this distance are merged into one destination (default `0.4` km).
 *   **Home Buffer (`home_buffer_m`)**: In `ember.destination.infer_destinations`, stops within this distance of home are excluded (default `400` m).
 
 ## Future Enhancements
-*   **Intermediate Stop Tracking**: Currently, `ember.destination` only tracks final overnight destinations. Literature indicates ~60% of evacuees make intermediate stops. A future module (e.g., `embark.destination.extract_trip_chain`) will capture multi-destination sequencing and intermediate stops before the final stay.
+*   **Route Modeling (network-backed)**: `ember.mobility.routes` now provides neutral interfaces; next step is adding project-specific strategy implementations and network-graph calibration.
 
 
 

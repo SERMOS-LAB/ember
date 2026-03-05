@@ -1043,6 +1043,8 @@ def plot_od_map(
     ylim: tuple | None = None,
     zoom_percentile: float = 99.5,
     figsize: tuple = (14, 12),
+    census_tracts=None,
+    use_basemap: bool = True,
     output_path: str = None,
 ):
     """
@@ -1153,37 +1155,45 @@ def plot_od_map(
     ax.set_xlim(x0, x1)
     ax.set_ylim(y0, y1)
 
-    # ---- Basemap: Local Census Tracts (Paper Style) ----
-    import os
-    base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    tracts_path = os.path.join(base_dir, 'examples', 'data', 'tls', 'tl_2023_06_tract.shp')
-    
-    if os.path.exists(tracts_path):
+    # ---- Optional census tract layer ----
+    ax.set_facecolor('white')
+    if use_basemap:
         try:
-            tracts = gpd.read_file(tracts_path)
-            tracts_wm = tracts.to_crs(epsg=3857)
-            
-            # Use cx to filter tracts that intersect our bounding box to avoid plotting whole state unecessarily
+            import contextily as ctx
+            ctx.add_basemap(
+                ax,
+                source=ctx.providers.CartoDB.Positron,
+                attribution=False,
+                zorder=0,
+            )
+        except Exception:
+            # Keep white fallback when basemap tiles are unavailable.
+            pass
+
+    if census_tracts is not None:
+        try:
+            tracts_wm = census_tracts.to_crs(epsg=3857)
             pad_x = (x1 - x0) * 0.2
             pad_y = (y1 - y0) * 0.2
             tracts_clipped = tracts_wm.cx[x0-pad_x:x1+pad_x, y0-pad_y:y1+pad_y]
-            
-            # Plot tracts (white fill, light gray borders like the paper)
-            tracts_clipped.plot(ax=ax, facecolor='white', edgecolor='#e0e0e0', linewidth=0.5, zorder=1)
-            ax.set_facecolor('white')
-            
-            # Dissolve by county if possible to draw thicker county boundaries
+            tracts_clipped.plot(
+                ax=ax,
+                facecolor='white',
+                edgecolor='#e0e0e0',
+                linewidth=0.5,
+                zorder=1,
+            )
             if 'COUNTYFP' in tracts_clipped.columns:
                 counties = tracts_clipped.dissolve(by='COUNTYFP')
-                # Zorder = 2 to stay below zones and trips
-                counties.plot(ax=ax, facecolor='none', edgecolor='#b0b0b0', linewidth=1.2, zorder=2)
-                
+                counties.plot(
+                    ax=ax,
+                    facecolor='none',
+                    edgecolor='#b0b0b0',
+                    linewidth=1.2,
+                    zorder=2,
+                )
         except Exception as e:
-            print(f"Could not load tracts basemap: {e}")
-            ax.set_facecolor('white')
-    else:
-        # Fallback
-        ax.set_facecolor('white')
+            print(f"Could not render census_tracts layer: {e}")
 
     # ---- Evacuation zones (Order / Warning / combined) ----
     has_separate_zones = order_zones is not None or warning_zones is not None
