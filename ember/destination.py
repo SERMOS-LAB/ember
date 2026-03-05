@@ -184,9 +184,11 @@ def infer_destinations(
 def classify_destinations(
     destinations: pd.DataFrame,
     parcels=None,
+    roads=None,
     *,
     buffer_m: float = 50.0,
-    type_col: str = "GENERALIZE",
+    road_buffer_m: float = 20.0,
+    type_col: str = "UseType",
     dest_lat_col: str = "dest_lat",
     dest_lon_col: str = "dest_lon",
 ) -> pd.DataFrame:
@@ -203,9 +205,15 @@ def classify_destinations(
         Output of :func:`infer_destinations`.
     parcels : GeoDataFrame or None
         County parcel polygons with a ``type_col`` column describing
-        land-use (e.g. 'residential', 'commercial').
+        land-use (e.g. 'Residential', 'Commercial').
+    roads : GeoDataFrame or None
+        Road centreline geometry (e.g. TIGER/Line roads).  Points
+        within ``road_buffer_m`` of a road that were not matched to a
+        parcel are labelled ``"road"``.
     buffer_m : float
         Buffer around destination points for nearest-parcel fallback.
+    road_buffer_m : float
+        Buffer around road centrelines for road classification (metres).
     type_col : str
         Column in ``parcels`` containing the land-use type string.
 
@@ -263,10 +271,31 @@ def classify_destinations(
         if type_col in joined2.columns:
             df.loc[unmatched, "dest_type"] = joined2[type_col].values
 
-    # Destinations still unmatched after both joins → likely on a road or in transit
+    # --- Road classification using actual road geometry ---
     still_unmatched = df["dest_type"].isna()
-    if still_unmatched.any():
-        df.loc[still_unmatched, "dest_type"] = "road/transit"
+    if still_unmatched.any() and roads is not None:
+        if roads.crs is None or roads.crs.to_epsg() != 3857:
+            roads_proj = roads.to_crs("EPSG:3857")
+        else:
+            roads_proj = roads
+        road_buffer = gpd.GeoDataFrame(
+            geometry=roads_proj.geometry.buffer(road_buffer_m)
+        ).dissolve().to_crs("EPSG:4326")
+
+        unmatched_pts = dest_gdf[still_unmatched]
+        road_join = gpd.sjoin(
+            unmatched_pts, road_buffer, how="left", predicate="within"
+        )
+        is_road = ~road_join["index_right"].isna()
+        is_road = is_road[~is_road.index.duplicated(keep="first")]
+        road_mask = still_unmatched.copy()
+        road_indices = is_road[is_road].index
+        df.loc[road_indices, "dest_type"] = "road"
+
+    # Destinations still unmatched after parcel + road joins → unknown
+    still_unknown = df["dest_type"].isna()
+    if still_unknown.any():
+        df.loc[still_unknown, "dest_type"] = "unknown"
 
     # Standardize categories
     df["dest_type"] = _standardize_type(df["dest_type"])
@@ -279,12 +308,18 @@ def classify_destinations(
 # ---------------------------------------------------------------------------
 
 _TYPE_MAP = {
-    # Residential
+    # Residential — LA County UseType values
     "residential": "residential",
     "single family": "residential",
+    "single-family": "residential",
     "multi family": "residential",
+    "multi-family": "residential",
     "multifamily": "residential",
     "mobile home": "residential",
+    "condominium": "residential",
+    "duplex": "residential",
+    "triplex": "residential",
+    "apartment": "residential",
     # Hotel / Motel
     "hotel": "hotel/motel",
     "motel": "hotel/motel",
@@ -297,6 +332,9 @@ _TYPE_MAP = {
     "retail": "commercial",
     "office": "commercial",
     "mixed use": "commercial",
+    "parking": "commercial",
+    "service station": "commercial",
+    "gas station": "commercial",
     # Industrial
     "industrial": "industrial",
     "manufacturing": "industrial",
@@ -313,17 +351,21 @@ _TYPE_MAP = {
     "government": "public",
     "institutional": "public",
     "civic": "public",
+    "exempt": "public",
     # Open Space / Recreation
     "park": "open space",
     "recreation": "open space",
     "open space": "open space",
     "agriculture": "open space",
     "rural": "open space",
-    # Road / Transportation
+    "vacant": "open space",
+    # Road / Transportation — only from actual road geometry
     "road": "road",
     "highway": "road",
     "transportation": "road",
     "right of way": "road",
+    # Unknown / catch-all
+    "unknown": "unknown",
 }
 
 

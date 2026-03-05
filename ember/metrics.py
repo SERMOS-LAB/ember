@@ -895,6 +895,7 @@ def plot_destination_types(
         'residential': '#4fc3f7', 'hotel/motel': '#ff8a65',
         'commercial': '#81c784', 'public': '#ba68c8',
         'road': '#ffb74d', 'other': '#90a4ae',
+        'unknown': '#e0e0e0',
     }
     pie_colors = [colors_map.get(t, '#bdbdbd') for t in pcts.index]
     wedges, texts, autotexts = ax.pie(
@@ -1544,6 +1545,7 @@ def plot_return_by_destination(
             'residential': '#4fc3f7', 'hotel/motel': '#ff8a65',
             'commercial': '#81c784', 'public': '#ba68c8',
             'road': '#ffb74d', 'other': '#90a4ae',
+            'unknown': '#e0e0e0',
         }
         for patch, t in zip(bp['boxes'], types):
             patch.set_facecolor(colors_map.get(t, '#bdbdbd'))
