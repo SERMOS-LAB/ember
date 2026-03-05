@@ -741,3 +741,852 @@ def plot_return_timeline(
         plt.show()
     plt.close()
 
+
+# ==========================================================================
+# DESTINATION ANALYSIS PLOTS
+# ==========================================================================
+
+def plot_distance_histogram(
+    destinations: pd.DataFrame,
+    *,
+    distance_col: str = "eu_distance_km",
+    group_col: str | None = None,
+    max_km: float = 300,
+    bin_width: float = 10,
+    title: str = "Travel Distance Histogram with Cumulative Distribution",
+    output_path: str = None,
+):
+    """
+    Histogram of travel distances with overlaid CDF.
+
+    When ``group_col`` is None → single histogram + CDF.
+    When ``group_col`` is provided → overlaid histogram + CDF per group.
+    """
+    import matplotlib.pyplot as plt
+
+    fig, ax1 = plt.subplots(figsize=(12, 7))
+    bins = np.arange(0, max_km + bin_width, bin_width)
+
+    if group_col is None or group_col not in destinations.columns:
+        data = destinations[distance_col].dropna()
+        ax1.hist(data, bins=bins, alpha=0.5, color='#7986cb', edgecolor='white', label='Number of destinations')
+        ax2 = ax1.twinx()
+        sorted_d = np.sort(data)
+        cdf = np.arange(1, len(sorted_d) + 1) / len(sorted_d)
+        ax2.plot(sorted_d, cdf, color='#1a237e', linewidth=2, marker='', label='Cumulative distribution')
+        ax2.set_ylabel('Cumulative Distribution', fontsize=13)
+        ax2.set_ylim(0, 1.05)
+        lines1, labels1 = ax1.get_legend_handles_labels()
+        lines2, labels2 = ax2.get_legend_handles_labels()
+        ax1.legend(lines1 + lines2, labels1 + labels2, loc='upper right', fontsize=11)
+    else:
+        ax2 = ax1.twinx()
+        colors = plt.cm.Set2.colors
+        groups = destinations[group_col].dropna().unique()
+        for idx, g in enumerate(sorted(groups)):
+            data = destinations.loc[destinations[group_col] == g, distance_col].dropna()
+            c = colors[idx % len(colors)]
+            ax1.hist(data, bins=bins, alpha=0.4, color=c, edgecolor='white', label=f'{g}: count')
+            sorted_d = np.sort(data)
+            cdf = np.arange(1, len(sorted_d) + 1) / len(sorted_d)
+            ax2.plot(sorted_d, cdf, color=c, linewidth=2, marker='o', markersize=2, label=f'{g}: CDF')
+        ax2.set_ylabel('Cumulative Distribution', fontsize=13)
+        ax2.set_ylim(0, 1.05)
+        lines1, labels1 = ax1.get_legend_handles_labels()
+        lines2, labels2 = ax2.get_legend_handles_labels()
+        ax1.legend(lines1 + lines2, labels1 + labels2, loc='upper right', fontsize=10)
+
+    ax1.set_xlabel('Euclidean Distance (km)', fontsize=13)
+    ax1.set_ylabel('Number of Destinations', fontsize=13)
+    ax1.set_xlim(0, max_km)
+    ax1.set_title(title, fontsize=15, fontweight='bold')
+    plt.tight_layout()
+
+    if output_path:
+        plt.savefig(output_path, dpi=300, bbox_inches='tight')
+    else:
+        plt.show()
+    plt.close()
+
+
+def plot_distance_decay(
+    destinations: pd.DataFrame,
+    *,
+    distance_col: str = "eu_distance_km",
+    group_col: str = "Category",
+    max_km: float = 300,
+    title: str = "Travel Distance-Decay by Group",
+    output_path: str = None,
+):
+    """
+    Distance-decay (reverse CDF) curves by evacuee group.
+
+    Shows the ratio of destinations beyond a given distance threshold.
+    """
+    import matplotlib.pyplot as plt
+
+    fig, ax = plt.subplots(figsize=(10, 7))
+    colors = {'Warned & ordered evacuee': 'red', 'Self evacuee': 'green', 'Shadow evacuee': 'blue'}
+    default_colors = plt.cm.Set1.colors
+
+    groups = destinations[group_col].dropna().unique()
+    for idx, g in enumerate(sorted(groups)):
+        data = destinations.loc[destinations[group_col] == g, distance_col].dropna().values
+        if len(data) == 0:
+            continue
+        thresholds = np.arange(0, max_km + 1, 5)
+        ratios = [np.sum(data >= t) / len(data) for t in thresholds]
+        c = colors.get(g, default_colors[idx % len(default_colors)])
+        ax.plot(thresholds, ratios, linewidth=2, marker='o', markersize=3, color=c, label=str(g))
+
+    ax.set_xlabel('Euclidean Distance (km)', fontsize=13)
+    ax.set_ylabel('Ratio of Destinations', fontsize=13)
+    ax.set_xlim(0, max_km)
+    ax.set_ylim(0, 1.05)
+    ax.legend(fontsize=11)
+    ax.set_title(title, fontsize=15, fontweight='bold')
+    plt.tight_layout()
+
+    if output_path:
+        plt.savefig(output_path, dpi=300, bbox_inches='tight')
+    else:
+        plt.show()
+    plt.close()
+
+
+def plot_destination_types(
+    destinations: pd.DataFrame,
+    *,
+    type_col: str = "dest_type",
+    distance_col: str = "eu_distance_km",
+    distance_threshold: float | None = None,
+    threshold_mode: str = "all",
+    title: str = "Destination Types",
+    output_path: str = None,
+):
+    """
+    Stacked or pie chart of destination types.
+
+    Parameters
+    ----------
+    distance_threshold : float or None
+        If set, filter by distance.
+    threshold_mode : str
+        ``'leq'`` for ≤ threshold, ``'gt'`` for > threshold, ``'all'`` for no filter.
+    """
+    import matplotlib.pyplot as plt
+
+    df = destinations.copy()
+    if distance_threshold is not None:
+        if threshold_mode == "leq":
+            df = df[df[distance_col] <= distance_threshold]
+        elif threshold_mode == "gt":
+            df = df[df[distance_col] > distance_threshold]
+
+    if df.empty or type_col not in df.columns:
+        print(f"No data to plot for {title}")
+        return
+
+    counts = df[type_col].value_counts()
+    pcts = (counts / counts.sum() * 100).round(1)
+
+    fig, ax = plt.subplots(figsize=(8, 6))
+    colors_map = {
+        'residential': '#4fc3f7', 'hotel/motel': '#ff8a65',
+        'commercial': '#81c784', 'public': '#ba68c8',
+        'road': '#ffb74d', 'other': '#90a4ae',
+        'unknown': '#e0e0e0',
+    }
+    pie_colors = [colors_map.get(t, '#bdbdbd') for t in pcts.index]
+    wedges, texts, autotexts = ax.pie(
+        pcts.values, labels=pcts.index, autopct='%1.1f%%',
+        colors=pie_colors, textprops={'fontsize': 11}
+    )
+    for a in autotexts:
+        a.set_fontsize(10)
+    ax.set_title(title, fontsize=15, fontweight='bold')
+    plt.tight_layout()
+
+    if output_path:
+        plt.savefig(output_path, dpi=300, bbox_inches='tight')
+    else:
+        plt.show()
+    plt.close()
+
+    return pd.DataFrame({'type': counts.index, 'count': counts.values, 'pct': pcts.values})
+
+
+def plot_dest_type_comparison(
+    destinations: pd.DataFrame,
+    *,
+    type_col: str = "dest_type",
+    distance_col: str = "eu_distance_km",
+    threshold_km: float = 30.0,
+    title: str = "Destination Types: ≤30 km vs >30 km",
+    output_path: str = None,
+):
+    """
+    Side-by-side bar comparison of destination types ≤ threshold vs > threshold.
+    """
+    import matplotlib.pyplot as plt
+
+    near = destinations[destinations[distance_col] <= threshold_km]
+    far = destinations[destinations[distance_col] > threshold_km]
+
+    if near.empty and far.empty:
+        print("No data to plot.")
+        return
+
+    all_types = sorted(destinations[type_col].dropna().unique())
+    near_pcts = near[type_col].value_counts(normalize=True).reindex(all_types, fill_value=0) * 100
+    far_pcts = far[type_col].value_counts(normalize=True).reindex(all_types, fill_value=0) * 100
+
+    x = np.arange(len(all_types))
+    width = 0.35
+
+    fig, ax = plt.subplots(figsize=(10, 6))
+    ax.bar(x - width / 2, near_pcts.values, width, label=f'≤ {threshold_km} km', color='#4fc3f7')
+    ax.bar(x + width / 2, far_pcts.values, width, label=f'> {threshold_km} km', color='#ff8a65')
+    ax.set_xticks(x)
+    ax.set_xticklabels(all_types, rotation=30, ha='right', fontsize=11)
+    ax.set_ylabel('Percentage (%)', fontsize=13)
+    ax.legend(fontsize=12)
+    ax.set_title(title, fontsize=15, fontweight='bold')
+    plt.tight_layout()
+
+    if output_path:
+        plt.savefig(output_path, dpi=300, bbox_inches='tight')
+    else:
+        plt.show()
+    plt.close()
+
+
+def plot_group_dest_heatmap(
+    destinations: pd.DataFrame,
+    *,
+    group_col: str = "Category",
+    type_col: str = "dest_type",
+    distance_col: str = "eu_distance_km",
+    metric: str = "pct",
+    title: str = "Trips by Group and Destination Type",
+    output_path: str = None,
+):
+    """
+    Annotated heatmap: group × destination type.
+
+    ``metric`` controls the cell values:
+
+        ``'pct'`` → percent of trips.
+        ``'median_distance'`` → median distance in km.
+    """
+    import matplotlib.pyplot as plt
+    import matplotlib.colors as mcolors
+
+    df = destinations.dropna(subset=[group_col, type_col])
+    if df.empty:
+        print("No data to plot.")
+        return
+
+    groups = sorted(df[group_col].unique())
+    types = sorted(df[type_col].unique())
+
+    matrix = np.zeros((len(groups), len(types)))
+    for i, g in enumerate(groups):
+        sub = df[df[group_col] == g]
+        for j, t in enumerate(types):
+            sub_t = sub[sub[type_col] == t]
+            if metric == "pct":
+                matrix[i, j] = round(len(sub_t) / max(len(sub), 1) * 100, 1)
+            else:
+                matrix[i, j] = round(sub_t[distance_col].median(), 1) if len(sub_t) > 0 else 0
+
+    fig, ax = plt.subplots(figsize=(10, max(5, len(groups) * 0.8 + 1)))
+    cmap = plt.cm.Blues if metric == "pct" else plt.cm.GnBu
+    im = ax.imshow(matrix, cmap=cmap, aspect='auto')
+
+    ax.set_xticks(range(len(types)))
+    ax.set_xticklabels(types, rotation=30, ha='right', fontsize=11)
+    ax.set_yticks(range(len(groups)))
+    ax.set_yticklabels(groups, fontsize=11)
+
+    for i in range(len(groups)):
+        for j in range(len(types)):
+            val = matrix[i, j]
+            text_color = 'white' if val > matrix.max() * 0.6 else 'black'
+            ax.text(j, i, f'{val:.1f}', ha='center', va='center', fontsize=11, color=text_color)
+
+    plt.colorbar(im, ax=ax, shrink=0.8)
+    label = 'Percent of Trips (%)' if metric == "pct" else 'Median Distance (km)'
+    ax.set_title(f'{title}\n({label})', fontsize=14, fontweight='bold')
+    plt.tight_layout()
+
+    if output_path:
+        plt.savefig(output_path, dpi=300, bbox_inches='tight')
+    else:
+        plt.show()
+    plt.close()
+
+
+def plot_od_map(
+    destinations: pd.DataFrame,
+    fire_zones=None,
+    *,
+    order_zones=None,
+    warning_zones=None,
+    home_lat_col: str = "home_lat_4326",
+    home_lon_col: str = "home_lon_4326",
+    dest_lat_col: str = "dest_lat",
+    dest_lon_col: str = "dest_lon",
+    title: str = "Origin-Destination Movement",
+    max_trips: int | None = 500,
+    xlim: tuple | None = None,
+    ylim: tuple | None = None,
+    zoom_percentile: float = 99.5,
+    figsize: tuple = (14, 12),
+    census_tracts=None,
+    use_basemap: bool = True,
+    output_path: str = None,
+):
+    """
+    Map showing O-D pairs as lines from home to destination.
+
+    Uses contextily tile basemap for geographic context.
+    Automatically samples trips if the dataset is too large.
+
+    Parameters
+    ----------
+    fire_zones : GeoDataFrame or None
+        Combined fire/evacuation zones (single color). Ignored if
+        ``order_zones`` or ``warning_zones`` are provided.
+    order_zones : GeoDataFrame or None
+        Evacuation Order zones (rendered in dark red).
+    warning_zones : GeoDataFrame or None
+        Evacuation Warning zones (rendered in pink/magenta).
+    max_trips : int or None
+        Maximum number of O-D lines to draw. ``None`` draws all.
+    xlim : tuple or None
+        ``(lon_min, lon_max)`` to override automatic extent.
+    ylim : tuple or None
+        ``(lat_min, lat_max)`` to override automatic extent.
+    zoom_percentile : float
+        Percentile (0–100) for auto-clipping outlier destinations
+        (default 99.5). Set to 100 for no clipping.
+    figsize : tuple
+        Figure size ``(width, height)``.
+    """
+    import matplotlib.pyplot as plt
+    from matplotlib.lines import Line2D
+    from matplotlib.patches import Patch
+
+    try:
+        import geopandas as gpd
+        from shapely.geometry import LineString
+    except ImportError:
+        print("geopandas and shapely are required for plot_od_map")
+        return
+
+    df = destinations.dropna(subset=[home_lat_col, home_lon_col, dest_lat_col, dest_lon_col]).copy()
+    if df.empty:
+        print("No data to plot.")
+        return
+
+    # ---- Density control: sample if too many trips ----
+    n_total = len(df)
+    sampled = False
+    if max_trips is not None and n_total > max_trips:
+        df = df.sample(n=max_trips, random_state=42)
+        sampled = True
+
+    # Build GeoDataFrames in EPSG:4326
+    lines = [
+        LineString([
+            (row[home_lon_col], row[home_lat_col]),
+            (row[dest_lon_col], row[dest_lat_col])
+        ])
+        for _, row in df.iterrows()
+    ]
+    gdf_lines = gpd.GeoDataFrame(df, geometry=lines, crs="EPSG:4326")
+    origins = gpd.GeoDataFrame(
+        df, geometry=gpd.points_from_xy(df[home_lon_col], df[home_lat_col]), crs="EPSG:4326"
+    )
+    dests = gpd.GeoDataFrame(
+        df, geometry=gpd.points_from_xy(df[dest_lon_col], df[dest_lat_col]), crs="EPSG:4326"
+    )
+
+    # ---- Project to Web Mercator for basemap ----
+    gdf_lines_wm = gdf_lines.to_crs(epsg=3857)
+    origins_wm = origins.to_crs(epsg=3857)
+    dests_wm = dests.to_crs(epsg=3857)
+
+    # ---- Compute bounds FIRST ----
+    from pyproj import Transformer
+    transformer = Transformer.from_crs("EPSG:4326", "EPSG:3857", always_xy=True)
+
+    if xlim is not None and ylim is not None:
+        x0, y0 = transformer.transform(xlim[0], ylim[0])
+        x1, y1 = transformer.transform(xlim[1], ylim[1])
+    elif xlim is not None:
+        x0, _ = transformer.transform(xlim[0], 0)
+        x1, _ = transformer.transform(xlim[1], 0)
+        y0, y1 = dests_wm.total_bounds[1], dests_wm.total_bounds[3]
+    elif ylim is not None:
+        _, y0 = transformer.transform(0, ylim[0])
+        _, y1 = transformer.transform(0, ylim[1])
+        x0, x1 = dests_wm.total_bounds[0], dests_wm.total_bounds[2]
+    else:
+        # Auto-clip to percentile bounds
+        all_lons = pd.concat([df[home_lon_col], df[dest_lon_col]])
+        all_lats = pd.concat([df[home_lat_col], df[dest_lat_col]])
+        lo_p = (100 - zoom_percentile) / 2
+        hi_p = 100 - lo_p
+        lon_lo, lon_hi = np.percentile(all_lons, [lo_p, hi_p])
+        lat_lo, lat_hi = np.percentile(all_lats, [lo_p, hi_p])
+        pad_lon = max(0.2, (lon_hi - lon_lo) * 0.12)
+        pad_lat = max(0.2, (lat_hi - lat_lo) * 0.12)
+        x0, y0 = transformer.transform(lon_lo - pad_lon, lat_lo - pad_lat)
+        x1, y1 = transformer.transform(lon_hi + pad_lon, lat_hi + pad_lat)
+
+    # ---- Create figure with correct proportions ----
+    dx = abs(x1 - x0)
+    dy = abs(y1 - y0)
+    fig_w = figsize[0]
+    fig_h = max(6, min(20, fig_w * (dy / dx) + 1.0)) if dx > 0 else figsize[1]
+    fig, ax = plt.subplots(1, 1, figsize=(fig_w, fig_h))
+    ax.set_xlim(x0, x1)
+    ax.set_ylim(y0, y1)
+
+    # ---- Optional census tract layer ----
+    ax.set_facecolor('white')
+    if use_basemap:
+        try:
+            import contextily as ctx
+            ctx.add_basemap(
+                ax,
+                source=ctx.providers.CartoDB.Positron,
+                attribution=False,
+                zorder=0,
+            )
+        except Exception:
+            # Keep white fallback when basemap tiles are unavailable.
+            pass
+
+    if census_tracts is not None:
+        try:
+            tracts_wm = census_tracts.to_crs(epsg=3857)
+            pad_x = (x1 - x0) * 0.2
+            pad_y = (y1 - y0) * 0.2
+            tracts_clipped = tracts_wm.cx[x0-pad_x:x1+pad_x, y0-pad_y:y1+pad_y]
+            tracts_clipped.plot(
+                ax=ax,
+                facecolor='white',
+                edgecolor='#e0e0e0',
+                linewidth=0.5,
+                zorder=1,
+            )
+            if 'COUNTYFP' in tracts_clipped.columns:
+                counties = tracts_clipped.dissolve(by='COUNTYFP')
+                counties.plot(
+                    ax=ax,
+                    facecolor='none',
+                    edgecolor='#b0b0b0',
+                    linewidth=1.2,
+                    zorder=2,
+                )
+        except Exception as e:
+            print(f"Could not render census_tracts layer: {e}")
+
+    # ---- Evacuation zones (Order / Warning / combined) ----
+    has_separate_zones = order_zones is not None or warning_zones is not None
+    if has_separate_zones:
+        if warning_zones is not None:
+            try:
+                wz = warning_zones.to_crs(epsg=3857)
+                wz.plot(ax=ax, color='#f8bbd0', alpha=0.60, edgecolor='#d81b60',
+                        linewidth=0.8, zorder=3)
+            except Exception:
+                pass
+        if order_zones is not None:
+            try:
+                oz = order_zones.to_crs(epsg=3857)
+                oz.plot(ax=ax, color='#ef9a9a', alpha=0.70, edgecolor='#c62828',
+                        linewidth=1.0, zorder=3)
+            except Exception:
+                pass
+    elif fire_zones is not None:
+        try:
+            fz = fire_zones.to_crs(epsg=3857)
+            fz.plot(ax=ax, color='#ef9a9a', alpha=0.60, edgecolor='#c62828',
+                    linewidth=1.0, zorder=3)
+        except Exception:
+            pass
+
+    # ---- O-D lines and points (Paper Style) ----
+    n = len(df)
+    line_alpha = max(0.1, min(0.5, 200 / n))
+    point_alpha = max(0.4, min(0.8, 300 / n))
+    point_size = max(2, min(12, 600 / n))
+
+    gdf_lines_wm.plot(ax=ax, color='#ffb74d', alpha=line_alpha, linewidth=0.5, zorder=4)
+    origins_wm.plot(ax=ax, color='#2e7d32', markersize=point_size, alpha=point_alpha, zorder=5)
+    dests_wm.plot(ax=ax, color='#1565c0', markersize=point_size, alpha=point_alpha, zorder=6)
+
+    # ---- Manual legend ----
+    legend_handles = [
+        Line2D([0], [0], color='#ff9800', linewidth=1.5, label='O-D Trip'),
+        Line2D([0], [0], marker='o', color='w', markerfacecolor='#4caf50',
+               markersize=6, label='Origin (Home)'),
+        Line2D([0], [0], marker='o', color='w', markerfacecolor='#1976d2',
+               markersize=6, label='Destination'),
+    ]
+    if has_separate_zones:
+        if order_zones is not None:
+            legend_handles.append(
+                Patch(facecolor='#ef9a9a', alpha=0.70, edgecolor='#c62828',
+                      label='Evacuation Order'))
+        if warning_zones is not None:
+            legend_handles.append(
+                Patch(facecolor='#f8bbd0', alpha=0.60, edgecolor='#d81b60',
+                      label='Evacuation Warning'))
+    elif fire_zones is not None:
+        legend_handles.append(
+            Patch(facecolor='#ef9a9a', alpha=0.60, edgecolor='#c62828',
+                  label='Fire/Evac Zone'))
+
+    subtitle = f'({n_total:,} trips' + (f', showing {max_trips:,} sampled)' if sampled else ')')
+    ax.legend(handles=legend_handles, fontsize=10, loc='lower left',
+              framealpha=1.0, edgecolor='black', fancybox=False)
+    ax.set_title(f'{title}\n{subtitle}', fontsize=14, fontweight='bold', pad=15)
+    
+    # Plot paper style frame
+    ax.set_xticks([])
+    ax.set_yticks([])
+    for spine in ax.spines.values():
+        spine.set_edgecolor('black')
+        spine.set_linewidth(1.0)
+        
+    plt.tight_layout()
+
+    if output_path:
+        plt.savefig(output_path, dpi=300, bbox_inches='tight')
+    else:
+        plt.show()
+    plt.close()
+
+
+
+def plot_evacuee_group_summary(
+    destinations: pd.DataFrame,
+    *,
+    group_col: str = "Category",
+    id_col: str = "ID",
+    title: str = "Evacuee Groups and Destinations",
+    output_path: str = None,
+):
+    """
+    Dual-axis chart: percentage of evacuee type (bar) + mean/median
+    number of destinations per person (line).
+    """
+    import matplotlib.pyplot as plt
+
+    # Count unique evacuees and destinations per group
+    user_groups = destinations.drop_duplicates(subset=[id_col])
+    grp_counts = user_groups[group_col].value_counts()
+    grp_pct = (grp_counts / grp_counts.sum() * 100)
+
+    dest_per_user = destinations.groupby([id_col, group_col]).size().reset_index(name='n_dest')
+
+    stats = dest_per_user.groupby(group_col)['n_dest'].agg(['mean', 'median'])
+
+    groups = grp_pct.index.tolist()
+    x = np.arange(len(groups))
+
+    fig, ax1 = plt.subplots(figsize=(12, 7))
+    bars = ax1.bar(x, grp_pct.values, color='#ffb74d', edgecolor='#e65100', alpha=0.8, label='% of evacuees')
+    ax1.set_ylabel('Percentage (%)', fontsize=13, color='#e65100')
+
+    ax2 = ax1.twinx()
+    means = [stats.loc[g, 'mean'] if g in stats.index else 0 for g in groups]
+    medians = [stats.loc[g, 'median'] if g in stats.index else 0 for g in groups]
+    ax2.plot(x, means, 'o-', color='#1565c0', linewidth=2, markersize=8, label='Mean # destinations')
+    ax2.plot(x, medians, 's--', color='#4fc3f7', linewidth=2, markersize=8, label='Median # destinations')
+    ax2.set_ylabel('Number of Destinations', fontsize=13, color='#1565c0')
+
+    ax1.set_xticks(x)
+    ax1.set_xticklabels(groups, rotation=20, ha='right', fontsize=11)
+
+    lines1, labels1 = ax1.get_legend_handles_labels()
+    lines2, labels2 = ax2.get_legend_handles_labels()
+    ax1.legend(lines1 + lines2, labels1 + labels2, loc='upper right', fontsize=11)
+
+    ax1.set_title(title, fontsize=15, fontweight='bold')
+    plt.tight_layout()
+
+    if output_path:
+        plt.savefig(output_path, dpi=300, bbox_inches='tight')
+    else:
+        plt.show()
+    plt.close()
+
+
+def plot_destination_count(
+    destinations: pd.DataFrame,
+    *,
+    id_col: str = "ID",
+    title: str = "Distribution of Number of Destinations per Evacuee",
+    output_path: str = None,
+):
+    """
+    Bar chart showing how many evacuees had 1, 2, 3, … destinations.
+    """
+    import matplotlib.pyplot as plt
+
+    counts = destinations.groupby(id_col).size().value_counts().sort_index()
+
+    fig, ax = plt.subplots(figsize=(8, 6))
+    ax.bar(counts.index, counts.values, edgecolor='black', color='#7986cb')
+    ax.set_xlabel('Number of Destinations', fontsize=13)
+    ax.set_ylabel('Frequency (Evacuees)', fontsize=13)
+    ax.set_title(title, fontsize=15, fontweight='bold')
+    plt.tight_layout()
+
+    if output_path:
+        plt.savefig(output_path, dpi=300, bbox_inches='tight')
+    else:
+        plt.show()
+    plt.close()
+
+
+# ==========================================================================
+# ADVANCED DESTINATION ANALYTICS
+# ==========================================================================
+
+def ks_test_distances(
+    destinations: pd.DataFrame,
+    *,
+    group_col: str = "Category",
+    distance_col: str = "eu_distance_km",
+    plot: bool = True,
+    title: str = "K-S Test: Pairwise Distance Distributions",
+    output_path: str = None,
+) -> pd.DataFrame:
+    """
+    Kolmogorov-Smirnov tests comparing travel-distance distributions
+    between all pairs of evacuee groups.
+
+    Returns a summary DataFrame of pairwise KS statistics and p-values,
+    and optionally plots a matrix heatmap.
+
+    Parameters
+    ----------
+    destinations : DataFrame
+        Must contain ``group_col`` and ``distance_col``.
+    group_col : str
+        Column identifying the evacuee group.
+    distance_col : str
+        Column with distance values (km).
+    plot : bool
+        If True, render an annotated heatmap of KS statistics.
+    """
+    from scipy.stats import ks_2samp
+    import matplotlib.pyplot as plt
+
+    groups = sorted(destinations[group_col].dropna().unique())
+    n = len(groups)
+    ks_matrix = np.zeros((n, n))
+    p_matrix = np.ones((n, n))
+    results = []
+
+    for i in range(n):
+        for j in range(i + 1, n):
+            d1 = destinations.loc[destinations[group_col] == groups[i], distance_col].dropna()
+            d2 = destinations.loc[destinations[group_col] == groups[j], distance_col].dropna()
+            if len(d1) < 2 or len(d2) < 2:
+                continue
+            stat, pval = ks_2samp(d1, d2)
+            ks_matrix[i, j] = stat
+            ks_matrix[j, i] = stat
+            p_matrix[i, j] = pval
+            p_matrix[j, i] = pval
+            results.append({
+                'Group_A': groups[i],
+                'Group_B': groups[j],
+                'KS_Statistic': round(stat, 4),
+                'p_value': round(pval, 6),
+                'Significant (p<0.05)': pval < 0.05,
+                'n_A': len(d1),
+                'n_B': len(d2),
+            })
+
+    results_df = pd.DataFrame(results)
+
+    if plot and n > 1:
+        fig, ax = plt.subplots(figsize=(max(6, n * 1.2), max(5, n * 1.0)))
+        im = ax.imshow(ks_matrix, cmap='YlOrRd', vmin=0, vmax=max(0.3, ks_matrix.max()))
+
+        ax.set_xticks(range(n))
+        ax.set_xticklabels(groups, rotation=30, ha='right', fontsize=10)
+        ax.set_yticks(range(n))
+        ax.set_yticklabels(groups, fontsize=10)
+
+        for i in range(n):
+            for j in range(n):
+                if i == j:
+                    ax.text(j, i, '—', ha='center', va='center', fontsize=10)
+                else:
+                    sig = '***' if p_matrix[i, j] < 0.001 else ('**' if p_matrix[i, j] < 0.01 else ('*' if p_matrix[i, j] < 0.05 else ''))
+                    color = 'white' if ks_matrix[i, j] > ks_matrix.max() * 0.5 else 'black'
+                    ax.text(j, i, f'{ks_matrix[i,j]:.3f}{sig}', ha='center', va='center', fontsize=9, color=color)
+
+        plt.colorbar(im, ax=ax, shrink=0.8, label='KS Statistic')
+        ax.set_title(f'{title}\n(* p<0.05, ** p<0.01, *** p<0.001)', fontsize=13, fontweight='bold')
+        plt.tight_layout()
+
+        if output_path:
+            plt.savefig(output_path, dpi=300, bbox_inches='tight')
+        else:
+            plt.show()
+        plt.close()
+
+    return results_df
+
+
+def plot_temporal_destinations(
+    destinations: pd.DataFrame,
+    *,
+    date_col: str = "dest_date",
+    distance_col: str = "eu_distance_km",
+    group_col: str | None = None,
+    title: str = "Destination Distance Over Time",
+    output_path: str = None,
+):
+    """
+    Track how evacuation destinations evolve over the fire timeline.
+
+    Plots daily median distance to destination with a scatter of individual
+    points, showing whether evacuees move further away or closer to home
+    as the fire progresses.
+    """
+    import matplotlib.pyplot as plt
+
+    df = destinations.copy()
+    df['_date'] = pd.to_datetime(df[date_col])
+
+    fig, ax = plt.subplots(figsize=(14, 7))
+
+    if group_col and group_col in df.columns:
+        colors = plt.cm.Set2.colors
+        for idx, (g, grp) in enumerate(sorted(df.groupby(group_col))):
+            c = colors[idx % len(colors)]
+            daily = grp.groupby('_date')[distance_col].agg(['median', 'count', 'mean'])
+            ax.scatter(grp['_date'], grp[distance_col], alpha=0.15, s=8, color=c)
+            ax.plot(daily.index, daily['median'], 'o-', color=c, linewidth=2, markersize=5, label=f'{g} (median)')
+    else:
+        daily = df.groupby('_date')[distance_col].agg(['median', 'count', 'mean'])
+        ax.scatter(df['_date'], df[distance_col], alpha=0.15, s=8, color='#7986cb')
+        ax.plot(daily.index, daily['median'], 'o-', color='#1a237e', linewidth=2.5, markersize=6, label='Median distance')
+
+    ax.set_xlabel('Date', fontsize=13)
+    ax.set_ylabel('Euclidean Distance from Home (km)', fontsize=13)
+    ax.legend(fontsize=11)
+    ax.set_title(title, fontsize=15, fontweight='bold')
+
+    # Add daily destination count as annotation bar
+    daily_all = df.groupby('_date')[distance_col].count()
+    ax2 = ax.twinx()
+    ax2.bar(daily_all.index, daily_all.values, alpha=0.12, color='gray', width=0.8, label='# destinations')
+    ax2.set_ylabel('Number of Destinations', fontsize=11, color='gray')
+    ax2.tick_params(axis='y', labelcolor='gray')
+
+    plt.tight_layout()
+    if output_path:
+        plt.savefig(output_path, dpi=300, bbox_inches='tight')
+    else:
+        plt.show()
+    plt.close()
+
+
+def plot_return_by_destination(
+    destinations: pd.DataFrame,
+    evac_metrics: pd.DataFrame,
+    *,
+    id_col: str = "ID",
+    type_col: str = "dest_type",
+    distance_col: str = "eu_distance_km",
+    return_col: str = "ReturnDate",
+    departure_col: str = "DepartureDate",
+    title: str = "Return Behavior by Destination Type",
+    output_path: str = None,
+):
+    """
+    Analyze and plot the relationship between destination type/distance
+    and when evacuees return home.
+
+    Creates a two-panel figure:
+    - Left: box plot of trip duration (days away) by destination type
+    - Right: scatter of distance vs. days away, colored by destination type
+    """
+    import matplotlib.pyplot as plt
+
+    # Merge return info onto primary (first) destination per evacuee
+    first_dest = destinations.sort_values('dest_order').drop_duplicates(subset=[id_col], keep='first')
+    merged = first_dest.merge(
+        evac_metrics[[id_col, return_col, departure_col]].drop_duplicates(subset=[id_col]),
+        on=id_col, how='inner',
+    )
+
+    merged[return_col] = pd.to_datetime(merged[return_col], errors='coerce')
+    merged[departure_col] = pd.to_datetime(merged[departure_col], errors='coerce')
+    merged['days_away'] = (merged[return_col] - merged[departure_col]).dt.total_seconds() / 86400
+    merged = merged.dropna(subset=['days_away'])
+    merged = merged[merged['days_away'] > 0]
+
+    if merged.empty:
+        print("No valid return data to plot.")
+        return
+
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 7))
+
+    # -- Panel 1: Days away by destination type --
+    if type_col in merged.columns and merged[type_col].notna().any():
+        types = sorted(merged[type_col].dropna().unique())
+        data_by_type = [merged.loc[merged[type_col] == t, 'days_away'].values for t in types]
+        bp = ax1.boxplot(data_by_type, labels=types, patch_artist=True, showfliers=False)
+        colors_map = {
+            'residential': '#4fc3f7', 'hotel/motel': '#ff8a65',
+            'commercial': '#81c784', 'public': '#ba68c8',
+            'road': '#ffb74d', 'other': '#90a4ae',
+            'unknown': '#e0e0e0',
+        }
+        for patch, t in zip(bp['boxes'], types):
+            patch.set_facecolor(colors_map.get(t, '#bdbdbd'))
+        ax1.set_ylabel('Days Away', fontsize=12)
+        ax1.set_title('Trip Duration by Destination Type', fontsize=13, fontweight='bold')
+        ax1.tick_params(axis='x', rotation=30)
+    else:
+        ax1.hist(merged['days_away'], bins=20, edgecolor='black', color='#7986cb')
+        ax1.set_xlabel('Days Away')
+        ax1.set_ylabel('Frequency')
+        ax1.set_title('Distribution of Trip Duration', fontsize=13, fontweight='bold')
+
+    # -- Panel 2: Distance vs days away --
+    if type_col in merged.columns and merged[type_col].notna().any():
+        for t in sorted(merged[type_col].dropna().unique()):
+            sub = merged[merged[type_col] == t]
+            c = colors_map.get(t, '#bdbdbd')
+            ax2.scatter(sub[distance_col], sub['days_away'], alpha=0.5, s=20, color=c, label=t)
+        ax2.legend(fontsize=10, loc='upper right')
+    else:
+        ax2.scatter(merged[distance_col], merged['days_away'], alpha=0.4, s=15, color='#7986cb')
+
+    ax2.set_xlabel('Euclidean Distance from Home (km)', fontsize=12)
+    ax2.set_ylabel('Days Away', fontsize=12)
+    ax2.set_title('Distance vs. Trip Duration', fontsize=13, fontweight='bold')
+
+    fig.suptitle(title, fontsize=15, fontweight='bold', y=1.02)
+    plt.tight_layout()
+
+    if output_path:
+        plt.savefig(output_path, dpi=300, bbox_inches='tight')
+    else:
+        plt.show()
+    plt.close()

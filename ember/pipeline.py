@@ -28,19 +28,22 @@ import geopandas as gpd
 from pyproj import Transformer
 from datetime import timedelta
 from typing import Dict, Optional
+from .contracts import PINGS_SCHEMA, canonicalize_columns, validate_columns
+from .mobility.trip_chain import TripChainConfig, build_trip_chain
 
 
 # ---------------------------------------------------------------------------
 # 1 · LOAD RAW GPS ----------------------------------------------------------
 # ---------------------------------------------------------------------------
 
-def load_gps_csv(path: str, id_col: str = "GRID") -> pd.DataFrame:
+def load_gps_csv(path: str, id_col: str = "GRID", *, verbose: bool = True) -> pd.DataFrame:
     """
     Load a raw GPS trajectory CSV (``dau_during_fire.csv`` or similar).
 
     Normalises the user-ID column to ``ID`` and parses timestamps.
     """
-    print(f"Loading GPS data from {path} …")
+    if verbose:
+        print(f"Loading GPS data from {path} …")
     df = pd.read_csv(path, low_memory=False)
     if id_col in df.columns and id_col != "ID":
         df.rename(columns={id_col: "ID"}, inplace=True)
@@ -53,7 +56,8 @@ def load_gps_csv(path: str, id_col: str = "GRID") -> pd.DataFrame:
     elif "Date" in df.columns:
         df["datetime"] = pd.to_datetime(df["Date"])
 
-    print(f"  → {len(df):,} pings, {df['ID'].nunique():,} unique devices")
+    if verbose:
+        print(f"  → {len(df):,} pings, {df['ID'].nunique():,} unique devices")
     return df
 
 
@@ -93,6 +97,7 @@ def compute_stops(
     fire_zones: gpd.GeoDataFrame,
     *,
     buffer_meters: float = 2000,
+    verbose: bool = True,
 ) -> pd.DataFrame:
     """
     Join GPS pings with home locations, compute distances, and flag zone exit.
@@ -123,7 +128,8 @@ def compute_stops(
     if stops.empty:
         return pd.DataFrame()
 
-    print(f"Computing stops for {len(target_ids):,} residents ({len(stops):,} pings) …")
+    if verbose:
+        print(f"Computing stops for {len(target_ids):,} residents ({len(stops):,} pings) …")
 
     # Prepare home info in EPSG:3857 for distance calc
     study_proj = study.to_crs(epsg=3857)
@@ -168,8 +174,90 @@ def compute_stops(
     # Impute missing distances
     stops = _impute_distances(stops)
 
-    print(f"  → {len(stops):,} stop records ready")
+    if verbose:
+        print(f"  → {len(stops):,} stop records ready")
     return stops
+
+
+def compute_trip_chain(
+    dau: pd.DataFrame,
+    homes: pd.DataFrame,
+    *,
+    id_col: str = "ID",
+    lat_col: str = "LAT",
+    lon_col: str = "LONG",
+    time_col: str = "datetime",
+    home_id_col: str = "ID",
+    home_lat_col: str = "home_lat_4326",
+    home_lon_col: str = "home_lon_4326",
+    home_radius_m: float = 400.0,
+    overnight_start_hour: int = 20,
+    overnight_end_hour: int = 7,
+    destination_min_dwell_s: float = 1800.0,
+    merge_nearby_stops: bool = True,
+    merge_distance_m: float = 120.0,
+    merge_gap_s: float = 3600.0,
+    classify_return: bool = True,
+) -> pd.DataFrame:
+    """Build user stop chains with intermediate-stop tracking."""
+    points = canonicalize_columns(dau, PINGS_SCHEMA)
+    homes_df = homes.copy()
+    resolved_id_col = id_col
+    resolved_home_id_col = home_id_col
+    if id_col in points.columns and id_col != "ID":
+        points = points.rename(columns={id_col: "ID"})
+        resolved_id_col = "ID"
+    if home_id_col in homes_df.columns and home_id_col != "ID":
+        homes_df = homes_df.rename(columns={home_id_col: "ID"})
+        resolved_home_id_col = "ID"
+
+    if lat_col in points.columns and "latitude" not in points.columns:
+        points = points.rename(columns={lat_col: "latitude"})
+    if lon_col in points.columns and "longitude" not in points.columns:
+        points = points.rename(columns={lon_col: "longitude"})
+    if time_col not in points.columns and "TIMESTAMP" in points.columns:
+        points[time_col] = pd.to_datetime(points["TIMESTAMP"], unit="ms", utc=True)
+    if "datetime" not in points.columns and time_col in points.columns:
+        points["datetime"] = points[time_col]
+    validate_columns(points, PINGS_SCHEMA)
+    required_home_cols = [resolved_home_id_col, home_lat_col, home_lon_col]
+    missing_home_cols = [c for c in required_home_cols if c not in homes_df.columns]
+    if missing_home_cols:
+        raise ValueError(
+            f"homes must contain columns {required_home_cols}. "
+            f"Missing: {missing_home_cols}"
+        )
+
+    rules = TripChainConfig(
+        home_radius_m=home_radius_m,
+        overnight_start_hour=overnight_start_hour,
+        overnight_end_hour=overnight_end_hour,
+        destination_min_dwell_s=destination_min_dwell_s,
+        merge_nearby_stops=merge_nearby_stops,
+        merge_distance_m=merge_distance_m,
+        merge_gap_s=merge_gap_s,
+        classify_return=classify_return,
+    )
+    return build_trip_chain(
+        points,
+        id_col=resolved_id_col,
+        lat_col="latitude",
+        lon_col="longitude",
+        time_col=time_col,
+        homes=homes_df,
+        home_id_col=resolved_home_id_col,
+        home_lat_col=home_lat_col,
+        home_lon_col=home_lon_col,
+        home_radius_m=home_radius_m,
+        overnight_start_hour=overnight_start_hour,
+        overnight_end_hour=overnight_end_hour,
+        destination_min_dwell_s=destination_min_dwell_s,
+        merge_nearby_stops=merge_nearby_stops,
+        merge_distance_m=merge_distance_m,
+        merge_gap_s=merge_gap_s,
+        classify_return=classify_return,
+        rules=rules,
+    )
 
 
 def _impute_distances(stops: pd.DataFrame) -> pd.DataFrame:
@@ -225,6 +313,7 @@ def infer_metrics(
     *,
     fire_end: str = "2025-01-14",
     min_dist_miles: float = 0.25,
+    verbose: bool = True,
 ) -> pd.DataFrame:
     """
     Classify each resident's evacuation behaviour from processed stop data.
@@ -257,7 +346,8 @@ def infer_metrics(
 
     records = []
     total = stops["ID"].nunique()
-    print(f"Inferring metrics for {total:,} residents …")
+    if verbose:
+        print(f"Inferring metrics for {total:,} residents …")
 
     for uid, grp in stops.groupby("ID"):
         grp = grp.sort_values("stop_date")
@@ -330,6 +420,7 @@ def infer_metrics(
 
     metrics_df = pd.DataFrame(records)
     n_evac = metrics_df["is_evacuee"].sum()
-    print(f"  → {n_evac:,} evacuees / {len(metrics_df):,} total")
-    print(metrics_df["Category"].value_counts().to_string())
+    if verbose:
+        print(f"  → {n_evac:,} evacuees / {len(metrics_df):,} total")
+        print(metrics_df["Category"].value_counts().to_string())
     return metrics_df
