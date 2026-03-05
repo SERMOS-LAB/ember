@@ -743,7 +743,7 @@ def plot_return_timeline(
 
 
 # ==========================================================================
-# DESTINATION ANALYSIS PLOTS  (Cova et al. 2024)
+# DESTINATION ANALYSIS PLOTS
 # ==========================================================================
 
 def plot_distance_histogram(
@@ -757,10 +757,10 @@ def plot_distance_histogram(
     output_path: str = None,
 ):
     """
-    Histogram of travel distances with overlaid CDF (Fig. 9 / Fig. 10).
+    Histogram of travel distances with overlaid CDF.
 
-    When ``group_col`` is None → single histogram + CDF (Fig. 9).
-    When ``group_col`` is provided → overlaid histogram + CDF per group (Fig. 10).
+    When ``group_col`` is None → single histogram + CDF.
+    When ``group_col`` is provided → overlaid histogram + CDF per group.
     """
     import matplotlib.pyplot as plt
 
@@ -819,7 +819,7 @@ def plot_distance_decay(
     output_path: str = None,
 ):
     """
-    Distance-decay (reverse CDF) curves by evacuee group (Fig. 11).
+    Distance-decay (reverse CDF) curves by evacuee group.
 
     Shows the ratio of destinations beyond a given distance threshold.
     """
@@ -865,7 +865,7 @@ def plot_destination_types(
     output_path: str = None,
 ):
     """
-    Stacked / pie chart of destination types (Fig. 5 / 6 / 7).
+    Stacked or pie chart of destination types.
 
     Parameters
     ----------
@@ -925,7 +925,7 @@ def plot_dest_type_comparison(
     output_path: str = None,
 ):
     """
-    Side-by-side bar comparison of destination types ≤ threshold vs > threshold (Fig. 8).
+    Side-by-side bar comparison of destination types ≤ threshold vs > threshold.
     """
     import matplotlib.pyplot as plt
 
@@ -971,13 +971,12 @@ def plot_group_dest_heatmap(
     output_path: str = None,
 ):
     """
-    Annotated heatmap: group × destination type (Fig. 15 / Fig. 16).
+    Annotated heatmap: group × destination type.
 
-    Parameters
-    ----------
-    metric : str
-        ``'pct'`` → percent of trips (Fig. 15).
-        ``'median_distance'`` → median distance in km (Fig. 16).
+    ``metric`` controls the cell values:
+
+        ``'pct'`` → percent of trips.
+        ``'median_distance'`` → median distance in km.
     """
     import matplotlib.pyplot as plt
     import matplotlib.colors as mcolors
@@ -1031,25 +1030,46 @@ def plot_od_map(
     destinations: pd.DataFrame,
     fire_zones=None,
     *,
+    order_zones=None,
+    warning_zones=None,
     home_lat_col: str = "home_lat_4326",
     home_lon_col: str = "home_lon_4326",
     dest_lat_col: str = "dest_lat",
     dest_lon_col: str = "dest_lon",
-    group_col: str | None = None,
     title: str = "Origin-Destination Movement",
-    boundary_level: str = "counties",
+    max_trips: int | None = 500,
+    xlim: tuple | None = None,
+    ylim: tuple | None = None,
+    zoom_percentile: float = 90,
+    figsize: tuple = (14, 12),
     output_path: str = None,
 ):
     """
-    Map showing O-D pairs as lines from home to destination (Fig. 12/13/14).
+    Map showing O-D pairs as lines from home to destination.
 
-    Includes county or state boundaries for geographic context.
+    Uses contextily tile basemap for geographic context.
+    Automatically samples trips if the dataset is too large.
 
     Parameters
     ----------
-    boundary_level : str
-        ``'counties'`` for county borders, ``'states'`` for state-only,
-        ``'none'`` to skip boundaries.
+    fire_zones : GeoDataFrame or None
+        Combined fire/evacuation zones (single color). Ignored if
+        ``order_zones`` or ``warning_zones`` are provided.
+    order_zones : GeoDataFrame or None
+        Evacuation Order zones (rendered in dark red).
+    warning_zones : GeoDataFrame or None
+        Evacuation Warning zones (rendered in pink/magenta).
+    max_trips : int or None
+        Maximum number of O-D lines to draw. ``None`` draws all.
+    xlim : tuple or None
+        ``(lon_min, lon_max)`` to override automatic extent.
+    ylim : tuple or None
+        ``(lat_min, lat_max)`` to override automatic extent.
+    zoom_percentile : float
+        Percentile (0–100) for auto-clipping outlier destinations
+        (default 90). Set to 100 for no clipping.
+    figsize : tuple
+        Figure size ``(width, height)``.
     """
     import matplotlib.pyplot as plt
     from matplotlib.lines import Line2D
@@ -1062,12 +1082,19 @@ def plot_od_map(
         print("geopandas and shapely are required for plot_od_map")
         return
 
-    df = destinations.dropna(subset=[home_lat_col, home_lon_col, dest_lat_col, dest_lon_col])
+    df = destinations.dropna(subset=[home_lat_col, home_lon_col, dest_lat_col, dest_lon_col]).copy()
     if df.empty:
         print("No data to plot.")
         return
 
-    # Build line geometries
+    # ---- Density control: sample if too many trips ----
+    n_total = len(df)
+    sampled = False
+    if max_trips is not None and n_total > max_trips:
+        df = df.sample(n=max_trips, random_state=42)
+        sampled = True
+
+    # Build GeoDataFrames in EPSG:4326
     lines = [
         LineString([
             (row[home_lon_col], row[home_lat_col]),
@@ -1076,7 +1103,6 @@ def plot_od_map(
         for _, row in df.iterrows()
     ]
     gdf_lines = gpd.GeoDataFrame(df, geometry=lines, crs="EPSG:4326")
-
     origins = gpd.GeoDataFrame(
         df, geometry=gpd.points_from_xy(df[home_lon_col], df[home_lat_col]), crs="EPSG:4326"
     )
@@ -1084,72 +1110,122 @@ def plot_od_map(
         df, geometry=gpd.points_from_xy(df[dest_lon_col], df[dest_lat_col]), crs="EPSG:4326"
     )
 
-    # Determine plot bounds (with padding)
-    all_lons = pd.concat([df[home_lon_col], df[dest_lon_col]])
-    all_lats = pd.concat([df[home_lat_col], df[dest_lat_col]])
-    pad_lon = max(0.5, (all_lons.max() - all_lons.min()) * 0.1)
-    pad_lat = max(0.5, (all_lats.max() - all_lats.min()) * 0.1)
-    bbox = (
-        all_lons.min() - pad_lon, all_lons.max() + pad_lon,
-        all_lats.min() - pad_lat, all_lats.max() + pad_lat,
-    )
+    # ---- Project to Web Mercator for basemap ----
+    gdf_lines_wm = gdf_lines.to_crs(epsg=3857)
+    origins_wm = origins.to_crs(epsg=3857)
+    dests_wm = dests.to_crs(epsg=3857)
 
-    fig, ax = plt.subplots(1, 1, figsize=(14, 10))
+    # ---- Compute bounds FIRST ----
+    from pyproj import Transformer
+    transformer = Transformer.from_crs("EPSG:4326", "EPSG:3857", always_xy=True)
 
-    # ---- Draw boundaries ----
-    if boundary_level != "none":
-        try:
-            # Use Natural Earth data via geopandas built-in
-            world = gpd.read_file(gpd.datasets.get_path("naturalearth_lowres"))
-            us = world[world['iso_a3'] == 'USA']
-            us.boundary.plot(ax=ax, color='#616161', linewidth=0.8, zorder=1)
-        except Exception:
-            pass
+    if xlim is not None and ylim is not None:
+        x0, y0 = transformer.transform(xlim[0], ylim[0])
+        x1, y1 = transformer.transform(xlim[1], ylim[1])
+    elif xlim is not None:
+        x0, _ = transformer.transform(xlim[0], 0)
+        x1, _ = transformer.transform(xlim[1], 0)
+        y0, y1 = dests_wm.total_bounds[1], dests_wm.total_bounds[3]
+    elif ylim is not None:
+        _, y0 = transformer.transform(0, ylim[0])
+        _, y1 = transformer.transform(0, ylim[1])
+        x0, x1 = dests_wm.total_bounds[0], dests_wm.total_bounds[2]
+    else:
+        # Auto-clip to percentile bounds
+        all_lons = pd.concat([df[home_lon_col], df[dest_lon_col]])
+        all_lats = pd.concat([df[home_lat_col], df[dest_lat_col]])
+        lo_p = (100 - zoom_percentile) / 2
+        hi_p = 100 - lo_p
+        lon_lo, lon_hi = np.percentile(all_lons, [lo_p, hi_p])
+        lat_lo, lat_hi = np.percentile(all_lats, [lo_p, hi_p])
+        pad_lon = max(0.2, (lon_hi - lon_lo) * 0.12)
+        pad_lat = max(0.2, (lat_hi - lat_lo) * 0.12)
+        x0, y0 = transformer.transform(lon_lo - pad_lon, lat_lo - pad_lat)
+        x1, y1 = transformer.transform(lon_hi + pad_lon, lat_hi + pad_lat)
 
-        try:
-            # Try to load US county boundaries from naturalearth_cities or census
-            import geodatasets
-            counties = gpd.read_file(geodatasets.data.fetch("geoda.us_counties"))
-            counties = counties.to_crs("EPSG:4326")
-            counties_clip = counties.cx[bbox[0]:bbox[1], bbox[2]:bbox[3]]
-            counties_clip.boundary.plot(ax=ax, color='#9e9e9e', linewidth=0.4, zorder=1)
-        except Exception:
-            # Fallback: draw state boundary only from naturalearth
+    # ---- Create figure with correct proportions ----
+    dx = abs(x1 - x0)
+    dy = abs(y1 - y0)
+    fig_w = figsize[0]
+    fig_h = max(6, min(20, fig_w * (dy / dx) + 1.0)) if dx > 0 else figsize[1]
+    fig, ax = plt.subplots(1, 1, figsize=(fig_w, fig_h))
+    ax.set_xlim(x0, x1)
+    ax.set_ylim(y0, y1)
+
+    # ---- Evacuation zones (Order / Warning / combined) ----
+    has_separate_zones = order_zones is not None or warning_zones is not None
+    if has_separate_zones:
+        if warning_zones is not None:
             try:
-                ne110 = gpd.read_file(gpd.datasets.get_path("naturalearth_lowres"))
-                us = ne110[ne110['name'] == 'United States of America']
-                us.boundary.plot(ax=ax, color='#616161', linewidth=1.0, zorder=1)
+                wz = warning_zones.to_crs(epsg=3857)
+                wz.plot(ax=ax, color='#f48fb1', alpha=0.30, edgecolor='#c2185b',
+                        linewidth=0.6, zorder=2)
             except Exception:
                 pass
-
-    # ---- Fire zones ----
-    if fire_zones is not None:
+        if order_zones is not None:
+            try:
+                oz = order_zones.to_crs(epsg=3857)
+                oz.plot(ax=ax, color='#ef5350', alpha=0.40, edgecolor='#b71c1c',
+                        linewidth=0.8, zorder=2)
+            except Exception:
+                pass
+    elif fire_zones is not None:
         try:
-            fz = fire_zones.to_crs("EPSG:4326") if fire_zones.crs and fire_zones.crs.to_epsg() != 4326 else fire_zones
-            fz.plot(ax=ax, color='#ef5350', alpha=0.3, edgecolor='red', linewidth=0.5, zorder=2)
+            fz = fire_zones.to_crs(epsg=3857)
+            fz.plot(ax=ax, color='#ef5350', alpha=0.35, edgecolor='darkred',
+                    linewidth=0.8, zorder=2)
         except Exception:
             pass
 
     # ---- O-D lines and points ----
-    gdf_lines.plot(ax=ax, color='#ffb74d', alpha=0.4, linewidth=0.5, zorder=3)
-    origins.plot(ax=ax, color='#66bb6a', markersize=3, alpha=0.6, zorder=4)
-    dests.plot(ax=ax, color='#1565c0', markersize=3, alpha=0.6, zorder=5)
+    n = len(df)
+    line_alpha = max(0.08, min(0.5, 200 / n))
+    point_alpha = max(0.2, min(0.7, 300 / n))
+    point_size = max(1, min(8, 500 / n))
 
-    # ---- Manual legend (avoids PatchCollection warning) ----
+    gdf_lines_wm.plot(ax=ax, color='#ffb74d', alpha=line_alpha, linewidth=0.3, zorder=3)
+    origins_wm.plot(ax=ax, color='#2e7d32', markersize=point_size, alpha=point_alpha, zorder=4)
+    dests_wm.plot(ax=ax, color='#1565c0', markersize=point_size, alpha=point_alpha, zorder=5)
+
+    # ---- Add basemap tiles (no labels for clean look) ----
+    try:
+        import contextily as ctx
+        ctx.add_basemap(ax, source=ctx.providers.CartoDB.PositronNoLabels, zoom='auto')
+    except (ImportError, AttributeError):
+        try:
+            ctx.add_basemap(ax, source=ctx.providers.CartoDB.Positron, zoom='auto')
+        except Exception:
+            ax.set_facecolor('#f5f5f5')
+    except Exception:
+        ax.set_facecolor('#f5f5f5')
+
+    # ---- Manual legend ----
     legend_handles = [
         Line2D([0], [0], color='#ffb74d', linewidth=1.5, label='O-D Trip'),
-        Line2D([0], [0], marker='o', color='w', markerfacecolor='#66bb6a', markersize=6, label='Origin (Home)'),
-        Line2D([0], [0], marker='o', color='w', markerfacecolor='#1565c0', markersize=6, label='Destination'),
+        Line2D([0], [0], marker='o', color='w', markerfacecolor='#2e7d32',
+               markersize=6, label='Origin (Home)'),
+        Line2D([0], [0], marker='o', color='w', markerfacecolor='#1565c0',
+               markersize=6, label='Destination'),
     ]
-    if fire_zones is not None:
-        legend_handles.append(Patch(facecolor='#ef5350', alpha=0.3, edgecolor='red', label='Fire/Evac Zone'))
-    ax.legend(handles=legend_handles, fontsize=11, loc='lower left')
+    if has_separate_zones:
+        if order_zones is not None:
+            legend_handles.append(
+                Patch(facecolor='#ef5350', alpha=0.40, edgecolor='#b71c1c',
+                      label='Evacuation Order'))
+        if warning_zones is not None:
+            legend_handles.append(
+                Patch(facecolor='#f48fb1', alpha=0.30, edgecolor='#c2185b',
+                      label='Evacuation Warning'))
+    elif fire_zones is not None:
+        legend_handles.append(
+            Patch(facecolor='#ef5350', alpha=0.35, edgecolor='darkred',
+                  label='Fire/Evac Zone'))
 
-    ax.set_xlim(bbox[0], bbox[1])
-    ax.set_ylim(bbox[2], bbox[3])
-    ax.set_title(title, fontsize=15, fontweight='bold')
-    ax.set_xlabel('Longitude')
-    ax.set_ylabel('Latitude')
+    subtitle = f'({n_total:,} trips' + (f', showing {max_trips:,} sampled)' if sampled else ')')
+    ax.legend(handles=legend_handles, fontsize=10, loc='lower left',
+              framealpha=0.9, edgecolor='gray')
+    ax.set_title(f'{title}\n{subtitle}', fontsize=14, fontweight='bold')
+    ax.set_axis_off()
     plt.tight_layout()
 
     if output_path:
@@ -1170,7 +1246,7 @@ def plot_evacuee_group_summary(
 ):
     """
     Dual-axis chart: percentage of evacuee type (bar) + mean/median
-    number of destinations per person (line) — replicates Fig. 4.
+    number of destinations per person (line).
     """
     import matplotlib.pyplot as plt
 

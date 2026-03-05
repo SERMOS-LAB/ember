@@ -1,18 +1,12 @@
 """
 Activity inference via incremental clustering.
 
-Implements the incremental clustering method (Zhang et al. 2023;
-Alexander et al. 2015; Wang & Chen 2018) used by both:
+Implements an incremental clustering method used by both:
 
 - **Activity-Based Origin**: clustering *pre-fire* pings to find
   where the evacuee actually was when the fire started.
 - **Destination Inference**: clustering *post-fire* nightly stops
   to identify overnight destinations.
-
-References
-----------
-Nima et al. (2025) — Generalized algorithm for inferring wildfire
-evacuation decisions using large-scale mobile location data.
 """
 
 from __future__ import annotations
@@ -68,7 +62,7 @@ def incremental_cluster(
     """
     Cluster a chronological sequence of GPS pings into activity locations.
 
-    Algorithm (Zhang et al. 2023 / Alexander et al. 2015):
+    Algorithm:
 
     1. Start a new cluster C₀ with the first point p₀.
     2. For each subsequent point pₖ, compute distance to the current
@@ -105,7 +99,13 @@ def incremental_cluster(
     df = pings.sort_values(time_col).reset_index(drop=True)
     lats = df[lat_col].values
     lons = df[lon_col].values
-    times = pd.to_datetime(df[time_col], utc=True)
+    times = df[time_col]
+    if not pd.api.types.is_datetime64_any_dtype(times):
+        times = pd.to_datetime(times, format="mixed", utc=True)
+    elif times.dt.tz is None:
+        times = times.dt.tz_localize("UTC")
+    else:
+        times = times.dt.tz_convert("UTC")
 
     clusters: List[ActivityCluster] = []
 
@@ -171,6 +171,7 @@ def find_origin(
     R_a: float = 200.0,
     T_a: str = "5min",
     home_radius: float = 200.0,
+    max_origin_distance_m: float = 50_000.0,
     lat_col: str = "latitude",
     lon_col: str = "longitude",
     time_col: str = "datetime",
@@ -180,16 +181,19 @@ def find_origin(
 
     Uses incremental clustering on the resident's pings around the
     fire-start time.  If the resident was at home, origin = home.
-    Otherwise, origin = the centroid of the first post-fire activity.
+    Otherwise, origin = the centroid of the activity cluster they
+    were in when the fire started.
 
-    Algorithm (Nima et al. 2025, Assumption 3 & 4):
+    Algorithm:
 
-    1. Check whether the evacuee was ever at their proxy home *during*
-       the evacuation window.  If yes → origin = home, departure =
-       last ping within home buffer.
-    2. If not → find the first activity cluster whose end_time is
-       *after* fire_start.  The cluster centroid is the origin; the
-       point following this cluster is the departure time.
+    1. Check whether the evacuee had any pings near home around or
+       shortly before fire_start.  If yes → origin = home.
+    2. If not → cluster *pre-fire* pings and find the cluster that
+       overlaps with fire_start (start ≤ fire_start ≤ end), or the
+       last cluster before fire_start.  That cluster centroid is the
+       activity-based origin.
+    3. Reject activity origins farther than ``max_origin_distance_m``
+       from home (likely travel/transit pings, not a real activity).
 
     Parameters
     ----------
@@ -205,6 +209,10 @@ def find_origin(
         Minimum activity duration (default '5min').
     home_radius : float
         Buffer around home in metres (default 200).
+    max_origin_distance_m : float
+        Maximum distance from home for an activity origin to be
+        considered valid (default 50 km). Origins beyond this
+        distance fall back to home.
 
     Returns
     -------
@@ -219,35 +227,84 @@ def find_origin(
         df[time_col] = pd.to_datetime(df["timestamp_ms"], unit="ms", utc=True)
 
     # Ensure time column is tz-aware (UTC) for consistent comparisons
-    df[time_col] = pd.to_datetime(df[time_col], utc=True)
+    if not pd.api.types.is_datetime64_any_dtype(df[time_col]):
+        df[time_col] = pd.to_datetime(df[time_col], format="mixed", utc=True)
+    elif df[time_col].dt.tz is None:
+        df[time_col] = df[time_col].dt.tz_localize("UTC")
+    else:
+        df[time_col] = df[time_col].dt.tz_convert("UTC")
     df = df.sort_values(time_col).reset_index(drop=True)
 
-    # ---- Check if evacuee was ever at home during evacuation window ----
+    # Normalize fire_start to UTC
     fire_ts = pd.Timestamp(fire_start)
     if fire_ts.tzinfo is None:
         fire_ts = fire_ts.tz_localize("UTC")
     else:
         fire_ts = fire_ts.tz_convert("UTC")
-    evac_pings = df[df[time_col] >= fire_ts]
 
-    if not evac_pings.empty:
-        for _, row in evac_pings.iterrows():
+    # ---- Step 1: Check if evacuee was at/near home around fire start ----
+    # Look at pings within a 2-hour window around fire start
+    window_start = fire_ts - pd.Timedelta("2h")
+    window_end = fire_ts + pd.Timedelta("1h")
+    window_pings = df[(df[time_col] >= window_start) & (df[time_col] <= window_end)]
+
+    if not window_pings.empty:
+        for _, row in window_pings.iterrows():
             d = haversine_m(home_lat, home_lon, row[lat_col], row[lon_col])
             if d <= home_radius:
-                # They were home at some point → home-based origin
                 return home_lat, home_lon, "home"
 
-    # ---- Not at home → find first post-fire activity cluster ----
+    # ---- Step 2: Cluster pre-fire pings to find activity location ----
+    # Use pings from up to 12 hours before fire start
+    lookback = fire_ts - pd.Timedelta("12h")
+    pre_fire = df[(df[time_col] >= lookback) & (df[time_col] <= fire_ts)]
+
+    if pre_fire.empty:
+        # No pre-fire data → default to home
+        return home_lat, home_lon, "home"
+
     clusters = incremental_cluster(
-        df, R_a=R_a, T_a=T_a, lat_col=lat_col, lon_col=lon_col, time_col=time_col
+        pre_fire, R_a=R_a, T_a=T_a,
+        lat_col=lat_col, lon_col=lon_col, time_col=time_col
     )
 
+    if not clusters:
+        return home_lat, home_lon, "home"
+
+    # Find cluster that contains fire_start, or the last cluster before it
+    best_cluster = None
     for c in clusters:
+        c_start = pd.Timestamp(c.start_time)
         c_end = pd.Timestamp(c.end_time)
+        if c_start.tzinfo is None:
+            c_start = c_start.tz_localize("UTC")
         if c_end.tzinfo is None:
             c_end = c_end.tz_localize("UTC")
-        if c_end >= fire_ts:
-            return c.centroid_lat, c.centroid_lon, "activity"
 
-    # Fallback: no qualifying activity found → default to home
-    return home_lat, home_lon, "home"
+        if c_start <= fire_ts <= c_end:
+            # Evacuee was in this cluster at fire start
+            best_cluster = c
+            break
+        elif c_end <= fire_ts:
+            # This cluster ended before fire — keep as candidate
+            best_cluster = c
+
+    if best_cluster is None:
+        return home_lat, home_lon, "home"
+
+    # ---- Step 3: Distance sanity check ----
+    d_from_home = haversine_m(
+        home_lat, home_lon,
+        best_cluster.centroid_lat, best_cluster.centroid_lon
+    )
+
+    if d_from_home <= home_radius:
+        # The "activity" is actually at home
+        return home_lat, home_lon, "home"
+
+    if d_from_home > max_origin_distance_m:
+        # Too far from home — likely a travel/transit artifact
+        return home_lat, home_lon, "home"
+
+    return best_cluster.centroid_lat, best_cluster.centroid_lon, "activity"
+

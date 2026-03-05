@@ -48,8 +48,8 @@ def infer(
     Supports three modes via the ``method`` parameter:
 
     - ``'home_based'`` (default): Uses the proxy home location as the
-      evacuation origin.  This is the original Zhao et al. (2022) approach.
-    - ``'activity_based'``: Uses incremental clustering (Nima et al. 2025)
+      evacuation origin.
+    - ``'activity_based'``: Uses incremental clustering
       to find where the evacuee actually was at fire start.  Requires
       ``home_lat``/``home_lon`` and ``order_start``.
     - ``'auto'``: Tries activity-based first; if the evacuee was at home,

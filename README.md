@@ -2,7 +2,7 @@
 
 `ember` is a highly modular Python package for inferring wildfire evacuation behavior from GPS-derived human mobility data. 
 
-It is designed to consume pre-processed mobility data (either raw GPS pings or cleaned stay-points) and apply standardized spatiotemporal algorithms to classify behavior according to the 7-category taxonomy (Nima et al., 2025; Zhao et al., 2022).
+It is designed to consume pre-processed mobility data (either raw GPS pings or cleaned stay-points) and apply standardized spatiotemporal algorithms to classify evacuation behavior according to a 7-category taxonomy.
 
 ## Installation
 
@@ -26,15 +26,15 @@ EMBER is designed to abstract away the boilerplate CRS transformations and spati
 *   **`ember.behavior`**: The core taxonomy classifier mapping 7 distinct behavioral outcomes (SELE, FEUO, FEUW, PERE, SEFN, NER, UR) based on departure timing and zone constraints.
 *   **`ember.departure`**: Infers $T_{dep}$ and $T_{ret}$ from raw GPS sequences by detecting extended trips away from the proxy home.
 *   **`ember.metrics`**: Generates high-level aggregated metrics and publication-ready visualizations, including Evacuation Compliance Rates, cumulative departure curves, temporal heatmaps, return behavior timelines, spatial delay maps, and the micro-macro DEDI (Damage-Evacuation Disparity Index).
-*   **`ember.activities`**: Shared incremental clustering primitive (Zhang et al. 2023; Nima et al. 2025) that powers activity-based origin detection and destination inference.
-*   **`ember.destination`**: Infers evacuation destinations from nightly stop data (Cova et al. 2024) and optionally classifies them by land-use type via county parcel spatial join.
+*   **`ember.activities`**: Shared incremental clustering primitive that powers activity-based origin detection and destination inference.
+*   **`ember.destination`**: Infers evacuation destinations from nightly stop data and optionally classifies them by land-use type via county parcel spatial join.
 
 ## Getting Started
 
 The best way to explore EMBER's capabilities is through the **example notebooks** in the `examples/` directory:
 
 *   **`01_evacuation_behavior.ipynb`** — End-to-end pipeline: home inference → zone classification → departure timing → 7-category behavioral taxonomy → metrics & visualizations. Applied to the January 2025 LA Wildfires (Palisades & Eaton fires).
-*   **`02_destination_origin.ipynb`** — Destination inference, distance analysis, K-S tests, temporal destination evolution, O-D maps, activity-based origin detection, and return behavior analysis (Cova et al. 2024; Nima et al. 2025).
+*   **`02_destination_origin.ipynb`** — Destination inference, distance analysis, K-S tests, temporal destination evolution, O-D maps, activity-based origin detection, and return behavior analysis.
 
 Here is a minimal code snippet to get started:
 

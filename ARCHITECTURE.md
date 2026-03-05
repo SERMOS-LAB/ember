@@ -71,12 +71,12 @@ graph TD
 *   **Outputs**: Aggregated DataFrames (Compliance Rates, DEDI) and matplotlib plots (`plot_departure_curve`, `plot_evacuation_composition`, `plot_temporal_heatmap`, `plot_return_timeline`, `plot_delay_map`).
 
 ### 7. `ember.activities`
-**Purpose**: Shared incremental clustering primitive (Zhang et al. 2023; Nima et al. 2025) that powers both activity-based origin inference and destination identification.
+**Purpose**: Shared incremental clustering primitive that powers both activity-based origin inference and destination identification.
 *   **Inputs**: Chronological GPS pings with `latitude`, `longitude`, `datetime`.
 *   **Outputs**: List of `ActivityCluster` namedtuples (centroid, start/end time, point count). Also provides `find_origin()` to determine if an evacuee departed from home or an external activity location.
 
 ### 8. `ember.destination`
-**Purpose**: Infers evacuation destinations from nightly stops and optionally classifies them by land-use type (Cova et al. 2024).
+**Purpose**: Infers evacuation destinations from nightly stops and optionally classifies them by land-use type.
 *   **Inputs**: Nightly stop records (from `pipeline.compute_stops`) and home locations. Optionally, parcel/land-use GeoDataFrame.
 *   **Outputs**: Per-evacuee destination list with distances. With parcel data: destination type classification (residential, hotel, commercial, public, road, other).
 
@@ -86,7 +86,7 @@ EMBER is designed to give researchers full control over the physical and tempora
 
 Here are the key hyperparameters you can manipulate:
 
-*   **Zone Buffering (`buffer_distance`)**: In `ember.zones.classify_zones`, you can adjust the physical width of the Shadow Evacuation zone (default is `1000.0` meters).
+*   **Zone Buffering (`buffer_distance`)**: In `ember.zones.classify_zones`, you can adjust the physical width of the Shadow Evacuation zone (default is `2000.0` meters).
 *   **Home Inference Grid (`grid_cell_size`)**: In `ember.ghost.infer_homes`, you can change the snapping resolution (default `50.0` meters).
 *   **Residency Thresholds (`min_nights`, `min_stay_time`)**: In `ghost.py`, you can strictly define who counts as a resident vs. a transient visitor (defaults strictly to `14` nights).
 *   **Trip Detection Radii (`home_radius`, `away_radius`)**: In `ember.departure.infer`, define what physical distance constitutes "leaving the neighborhood" (default `away_radius=1000.0`).
@@ -95,6 +95,11 @@ Here are the key hyperparameters you can manipulate:
 *   **Activity Duration Threshold (`T_a`)**: Minimum stay at a location to qualify as an activity (default `5min`).
 *   **Destination Merge Distance (`merge_distance_km`)**: In `ember.destination.infer_destinations`, successive overnight stops within this distance are merged into one destination (default `0.4` km).
 *   **Home Buffer (`home_buffer_m`)**: In `ember.destination.infer_destinations`, stops within this distance of home are excluded (default `400` m).
+
+## Future Enhancements
+*   **Intermediate Stop Tracking**: Currently, `ember.destination` only tracks final overnight destinations. Literature indicates ~60% of evacuees make intermediate stops. A future module (e.g., `embark.destination.extract_trip_chain`) will capture multi-destination sequencing and intermediate stops before the final stay.
+
+
 
 ```mermaid
 sequenceDiagram

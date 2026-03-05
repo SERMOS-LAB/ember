@@ -1,15 +1,10 @@
 """
 Destination inference for wildfire evacuees.
 
-Implements the destination inference algorithm from Cova et al. (2024):
+Implements a destination inference algorithm:
 overnight stops during the fire → filter within home buffer → merge
 nearby stops → destination list per evacuee → optional land-use
 classification via parcel spatial join.
-
-References
-----------
-Cova, T. J., et al. (2024). Destination unknown: Examining wildfire
-evacuee trips using GPS data. *Transportation Research Part D*.
 """
 
 from __future__ import annotations
@@ -59,7 +54,7 @@ def infer_destinations(
     """
     Infer evacuation destinations from nightly stop data.
 
-    Algorithm (Cova et al. 2024, Section 3.2–3.3):
+    Algorithm:
 
     1. For each evacuee, extract nightly stops (``nighttime_start``
        to ``nighttime_end``).
@@ -267,6 +262,11 @@ def classify_destinations(
         joined2 = joined2[~joined2.index.duplicated(keep="first")]
         if type_col in joined2.columns:
             df.loc[unmatched, "dest_type"] = joined2[type_col].values
+
+    # Destinations still unmatched after both joins → likely on a road or in transit
+    still_unmatched = df["dest_type"].isna()
+    if still_unmatched.any():
+        df.loc[still_unmatched, "dest_type"] = "road/transit"
 
     # Standardize categories
     df["dest_type"] = _standardize_type(df["dest_type"])

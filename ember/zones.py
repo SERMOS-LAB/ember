@@ -12,7 +12,7 @@ def classify_zones(
     homes: gpd.GeoDataFrame,
     fire_zones: gpd.GeoDataFrame,
     *,
-    buffer_distance: float = 1000.0,   # meters
+    buffer_distance: float = 2000.0,   # meters
     order_status: str = "Evacuation Order",
     warning_status: str = "Evacuation Warning",
 ) -> gpd.GeoDataFrame:
@@ -28,7 +28,10 @@ def classify_zones(
         Evacuation zones from `ember.io.load_fire_timeline`.
         Must be in EPSG:4326 and contain 'most_extreme_status'.
     buffer_distance : float
-        Distance in meters to expand Order/Warning zones to create a Buffer zone.
+        Distance in meters to expand Order/Warning zones to create
+        a Buffer (shadow evacuation) zone. Default is 2000 m.
+        Should be adjusted per region: e.g. 1000 m for dense urban
+        areas, up to 6000 m for rural/suburban contexts.
     order_status : str
         The string in 'most_extreme_status' that indicates a mandatory order.
     warning_status : str
