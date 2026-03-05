@@ -1040,7 +1040,7 @@ def plot_od_map(
     max_trips: int | None = 500,
     xlim: tuple | None = None,
     ylim: tuple | None = None,
-    zoom_percentile: float = 90,
+    zoom_percentile: float = 99.5,
     figsize: tuple = (14, 12),
     output_path: str = None,
 ):
@@ -1067,7 +1067,7 @@ def plot_od_map(
         ``(lat_min, lat_max)`` to override automatic extent.
     zoom_percentile : float
         Percentile (0–100) for auto-clipping outlier destinations
-        (default 90). Set to 100 for no clipping.
+        (default 99.5). Set to 100 for no clipping.
     figsize : tuple
         Figure size ``(width, height)``.
     """
@@ -1152,80 +1152,107 @@ def plot_od_map(
     ax.set_xlim(x0, x1)
     ax.set_ylim(y0, y1)
 
+    # ---- Basemap: Local Census Tracts (Paper Style) ----
+    import os
+    base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    tracts_path = os.path.join(base_dir, 'examples', 'data', 'tls', 'tl_2023_06_tract.shp')
+    
+    if os.path.exists(tracts_path):
+        try:
+            tracts = gpd.read_file(tracts_path)
+            tracts_wm = tracts.to_crs(epsg=3857)
+            
+            # Use cx to filter tracts that intersect our bounding box to avoid plotting whole state unecessarily
+            pad_x = (x1 - x0) * 0.2
+            pad_y = (y1 - y0) * 0.2
+            tracts_clipped = tracts_wm.cx[x0-pad_x:x1+pad_x, y0-pad_y:y1+pad_y]
+            
+            # Plot tracts (white fill, light gray borders like the paper)
+            tracts_clipped.plot(ax=ax, facecolor='white', edgecolor='#e0e0e0', linewidth=0.5, zorder=1)
+            ax.set_facecolor('white')
+            
+            # Dissolve by county if possible to draw thicker county boundaries
+            if 'COUNTYFP' in tracts_clipped.columns:
+                counties = tracts_clipped.dissolve(by='COUNTYFP')
+                # Zorder = 2 to stay below zones and trips
+                counties.plot(ax=ax, facecolor='none', edgecolor='#b0b0b0', linewidth=1.2, zorder=2)
+                
+        except Exception as e:
+            print(f"Could not load tracts basemap: {e}")
+            ax.set_facecolor('white')
+    else:
+        # Fallback
+        ax.set_facecolor('white')
+
     # ---- Evacuation zones (Order / Warning / combined) ----
     has_separate_zones = order_zones is not None or warning_zones is not None
     if has_separate_zones:
         if warning_zones is not None:
             try:
                 wz = warning_zones.to_crs(epsg=3857)
-                wz.plot(ax=ax, color='#f48fb1', alpha=0.30, edgecolor='#c2185b',
-                        linewidth=0.6, zorder=2)
+                wz.plot(ax=ax, color='#f8bbd0', alpha=0.60, edgecolor='#d81b60',
+                        linewidth=0.8, zorder=3)
             except Exception:
                 pass
         if order_zones is not None:
             try:
                 oz = order_zones.to_crs(epsg=3857)
-                oz.plot(ax=ax, color='#ef5350', alpha=0.40, edgecolor='#b71c1c',
-                        linewidth=0.8, zorder=2)
+                oz.plot(ax=ax, color='#ef9a9a', alpha=0.70, edgecolor='#c62828',
+                        linewidth=1.0, zorder=3)
             except Exception:
                 pass
     elif fire_zones is not None:
         try:
             fz = fire_zones.to_crs(epsg=3857)
-            fz.plot(ax=ax, color='#ef5350', alpha=0.35, edgecolor='darkred',
-                    linewidth=0.8, zorder=2)
+            fz.plot(ax=ax, color='#ef9a9a', alpha=0.60, edgecolor='#c62828',
+                    linewidth=1.0, zorder=3)
         except Exception:
             pass
 
-    # ---- O-D lines and points ----
+    # ---- O-D lines and points (Paper Style) ----
     n = len(df)
-    line_alpha = max(0.08, min(0.5, 200 / n))
-    point_alpha = max(0.2, min(0.7, 300 / n))
-    point_size = max(1, min(8, 500 / n))
+    line_alpha = max(0.1, min(0.5, 200 / n))
+    point_alpha = max(0.4, min(0.8, 300 / n))
+    point_size = max(2, min(12, 600 / n))
 
-    gdf_lines_wm.plot(ax=ax, color='#ffb74d', alpha=line_alpha, linewidth=0.3, zorder=3)
-    origins_wm.plot(ax=ax, color='#2e7d32', markersize=point_size, alpha=point_alpha, zorder=4)
-    dests_wm.plot(ax=ax, color='#1565c0', markersize=point_size, alpha=point_alpha, zorder=5)
-
-    # ---- Add basemap tiles (no labels for clean look) ----
-    try:
-        import contextily as ctx
-        ctx.add_basemap(ax, source=ctx.providers.CartoDB.PositronNoLabels, zoom='auto')
-    except (ImportError, AttributeError):
-        try:
-            ctx.add_basemap(ax, source=ctx.providers.CartoDB.Positron, zoom='auto')
-        except Exception:
-            ax.set_facecolor('#f5f5f5')
-    except Exception:
-        ax.set_facecolor('#f5f5f5')
+    gdf_lines_wm.plot(ax=ax, color='#ffb74d', alpha=line_alpha, linewidth=0.5, zorder=4)
+    origins_wm.plot(ax=ax, color='#2e7d32', markersize=point_size, alpha=point_alpha, zorder=5)
+    dests_wm.plot(ax=ax, color='#1565c0', markersize=point_size, alpha=point_alpha, zorder=6)
 
     # ---- Manual legend ----
     legend_handles = [
-        Line2D([0], [0], color='#ffb74d', linewidth=1.5, label='O-D Trip'),
-        Line2D([0], [0], marker='o', color='w', markerfacecolor='#2e7d32',
+        Line2D([0], [0], color='#ff9800', linewidth=1.5, label='O-D Trip'),
+        Line2D([0], [0], marker='o', color='w', markerfacecolor='#4caf50',
                markersize=6, label='Origin (Home)'),
-        Line2D([0], [0], marker='o', color='w', markerfacecolor='#1565c0',
+        Line2D([0], [0], marker='o', color='w', markerfacecolor='#1976d2',
                markersize=6, label='Destination'),
     ]
     if has_separate_zones:
         if order_zones is not None:
             legend_handles.append(
-                Patch(facecolor='#ef5350', alpha=0.40, edgecolor='#b71c1c',
+                Patch(facecolor='#ef9a9a', alpha=0.70, edgecolor='#c62828',
                       label='Evacuation Order'))
         if warning_zones is not None:
             legend_handles.append(
-                Patch(facecolor='#f48fb1', alpha=0.30, edgecolor='#c2185b',
+                Patch(facecolor='#f8bbd0', alpha=0.60, edgecolor='#d81b60',
                       label='Evacuation Warning'))
     elif fire_zones is not None:
         legend_handles.append(
-            Patch(facecolor='#ef5350', alpha=0.35, edgecolor='darkred',
+            Patch(facecolor='#ef9a9a', alpha=0.60, edgecolor='#c62828',
                   label='Fire/Evac Zone'))
 
     subtitle = f'({n_total:,} trips' + (f', showing {max_trips:,} sampled)' if sampled else ')')
     ax.legend(handles=legend_handles, fontsize=10, loc='lower left',
-              framealpha=0.9, edgecolor='gray')
-    ax.set_title(f'{title}\n{subtitle}', fontsize=14, fontweight='bold')
-    ax.set_axis_off()
+              framealpha=1.0, edgecolor='black', fancybox=False)
+    ax.set_title(f'{title}\n{subtitle}', fontsize=14, fontweight='bold', pad=15)
+    
+    # Plot paper style frame
+    ax.set_xticks([])
+    ax.set_yticks([])
+    for spine in ax.spines.values():
+        spine.set_edgecolor('black')
+        spine.set_linewidth(1.0)
+        
     plt.tight_layout()
 
     if output_path:
