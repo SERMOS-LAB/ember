@@ -97,8 +97,9 @@ def test_find_origin_at_activity():
     home_lat, home_lon = 34.05, -118.25
     # Pings are 10+ km from home (Santa Monica area)
     pings = _make_pings([
-        (34.02, -118.50, "2025-01-07 10:00:00"),
-        (34.02, -118.50, "2025-01-07 10:10:00"),  # 10 min activity
+        (34.02, -118.50, "2025-01-07 08:50:00"),
+        (34.02, -118.50, "2025-01-07 08:56:00"),  # 6 min pre-fire activity
+        (34.02, -118.50, "2025-01-07 09:10:00"),  # spans fire start
     ])
     lat, lon, origin_type = find_origin(
         pings, home_lat, home_lon,

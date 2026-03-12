@@ -39,6 +39,7 @@ The best way to explore EMBER's capabilities is through the **example notebooks*
 
 *   **`01_evacuation_behavior.ipynb`** — End-to-end pipeline: home inference → zone classification → departure timing → 7-category behavioral taxonomy → metrics & visualizations. Applied to the January 2025 LA Wildfires (Palisades & Eaton fires).
 *   **`02_destination_origin.ipynb`** — Chain-first destination inference, distance analysis, K-S tests, temporal destination evolution, O-D maps, activity-based origin detection, and return behavior analysis.
+*   **`03_marshall_fire_evacuation.ipynb`** — The Marshall Fire analysis using the ember pipeline, featuring configurable in-zone/buffer multi-night evacuation thresholds and per-zone order lifting dates.
     It demonstrates trip-chain extraction + role-aware destination logic.
 
 Here is a minimal code snippet to get started:

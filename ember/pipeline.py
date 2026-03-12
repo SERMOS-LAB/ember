@@ -139,6 +139,8 @@ def compute_stops(
     merge_cols = ["ID", "home_lon", "home_lat", "ZoneType", "OrderStart"]
     if "FireEvent" in study_proj.columns:
         merge_cols.append("FireEvent")
+    if "OrderEnd" in study_proj.columns:
+        merge_cols.append("OrderEnd")
 
 
     # Deduplicate merge source on ID
@@ -313,6 +315,8 @@ def infer_metrics(
     *,
     fire_end: str = "2025-01-14",
     min_dist_miles: float = 0.25,
+    min_evac_days: int = 2,
+    min_evac_days_buffer: int = 1,
     verbose: bool = True,
 ) -> pd.DataFrame:
     """
@@ -321,14 +325,26 @@ def infer_metrics(
     Parameters
     ----------
     stops : DataFrame
-        Output of :func:`compute_stops`.
+        Output of :func:`compute_stops`.  May optionally contain an
+        ``OrderEnd`` column with per-zone order/warning lift dates.
     fire_starts : dict
         ``{FireEvent: timestamp_str}`` mapping, e.g.
         ``{'Palisades': '2025-01-07 10:30', 'Eaton': '2025-01-07 18:18'}``.
     fire_end : str
-        Date string for the end of the study window.
+        Date string for the end of the study window (global fallback
+        when no per-zone ``OrderEnd`` is available).
     min_dist_miles : float
         Minimum distance from home (miles) to count as "away".
+    min_evac_days : int
+        Minimum number of consecutive calendar days a resident must
+        be away from home to be considered an evacuee (in-zone
+        residents, i.e. Order / Warning).  Default 2 (= "more than
+        one day" per Sun et al.).
+    min_evac_days_buffer : int
+        Same threshold for buffer-zone residents.  Default 1 (N = 1
+        for the Marshall Fire per Sun et al.).
+    verbose : bool
+        Print progress information.
 
     Returns
     -------
@@ -337,12 +353,28 @@ def infer_metrics(
         ``ReturnDate``, ``DelayHours``, and zone metadata.
     """
     fire_start_map = {k: pd.Timestamp(v) for k, v in fire_starts.items()}
-    order_end_dt = pd.to_datetime(fire_end) + timedelta(hours=23)
+    global_order_end = pd.to_datetime(fire_end) + timedelta(hours=23)
+
+    # --- Timezone alignment ---------------------------------------------------
+    # stop_date may be tz-aware (UTC) when parsed from epoch timestamps while
+    # fire_starts / fire_end are typically tz-naive strings.  Align everything
+    # to the same tz to avoid "Cannot subtract tz-naive and tz-aware" errors.
+    _sample_tz = stops["stop_date"].dt.tz if not stops.empty else None
+    if _sample_tz is not None:
+        fire_start_map = {
+            k: v.tz_localize(_sample_tz) if v.tzinfo is None else v.tz_convert(_sample_tz)
+            for k, v in fire_start_map.items()
+        }
+        if global_order_end.tzinfo is None:
+            global_order_end = global_order_end.tz_localize(_sample_tz)
+    # --------------------------------------------------------------------------
 
     # Universal fallback: earliest known fire start (for Buffer zones with NaN FireEvent)
     earliest_fire = min(fire_start_map.values()) if fire_start_map else pd.NaT
 
     stops["is_evacuated"] = stops["is_outside_zone"] & (stops["eu_distance"] >= min_dist_miles)
+
+    has_order_end_col = "OrderEnd" in stops.columns
 
     records = []
     total = stops["ID"].nunique()
@@ -364,6 +396,19 @@ def infer_metrics(
         if pd.isna(effective_start) and zone_type in ("Buffer", "Outside"):
             effective_start = fire_start_ts
 
+        # Per-zone order/warning end date, falling back to global fire_end
+        if has_order_end_col:
+            raw_end = grp.iloc[0]["OrderEnd"]
+            if pd.isna(raw_end):
+                order_end = global_order_end
+            else:
+                o_end = pd.to_datetime(raw_end)
+                if _sample_tz is not None:
+                    o_end = o_end.tz_localize(_sample_tz) if o_end.tzinfo is None else o_end.tz_convert(_sample_tz)
+                order_end = o_end
+        else:
+            order_end = global_order_end
+
         evac = grp[grp["is_evacuated"]]
 
         cat, dep, ret, delay = "NER", None, None, None
@@ -373,7 +418,9 @@ def infer_metrics(
             intervals = _consecutive_intervals(evac_dates)
             sel = _select_interval(intervals, effective_start)
 
-            if sel and sel[-1] > sel[0]:  # overnight check
+            # Configurable consecutive-day threshold
+            threshold = min_evac_days_buffer if zone_type == "Buffer" else min_evac_days
+            if sel and len(sel) >= threshold:
                 dep = evac[evac["stop_date"].dt.date == sel[0]]["stop_date"].min()
                 ret = evac[evac["stop_date"].dt.date == sel[-1]]["stop_date"].max()
 
@@ -386,21 +433,25 @@ def infer_metrics(
                 if pd.isna(effective_start):
                     cat = "UR"
                 elif dep < effective_start:
+                    # Left before order/warning was issued
                     if ret < effective_start:
-                        cat = "NER"
-                    elif dep < fire_start_ts:
-                        cat = "NER"
+                        cat = "NER"   # returned before order — not an evacuee
                     else:
-                        cat = "SELE"
-                else:
+                        cat = "SELE"  # self-evacuee leaving early
+                elif dep < order_end:
+                    # Left during order/warning period
                     if zone_type == "Buffer":
                         cat = "SEFN"
-                    elif zone_type == "Warning":
-                        cat = "FEUW" if ret > order_end_dt else "PERE"
-                    elif zone_type == "Order":
-                        cat = "FEUO" if ret > order_end_dt else "PERE"
+                    elif zone_type in ("Warning", "Order"):
+                        if ret > order_end:
+                            cat = "FEUW" if zone_type == "Warning" else "FEUO"
+                        else:
+                            cat = "PERE"
                     else:
                         cat = "UR"
+                else:
+                    # Left after order/warning was lifted
+                    cat = "UR"
 
         records.append({
             "ID": uid,
@@ -410,7 +461,7 @@ def infer_metrics(
             "DelayHours": delay,
             "ZoneType": zone_type,
             "OrderStart": effective_start if not pd.isna(effective_start) else order_start,
-            "OrderEnd": order_end_dt,
+            "OrderEnd": order_end,
             "FireEvent": fire_event,
 
             "fire_start": fire_start_ts,

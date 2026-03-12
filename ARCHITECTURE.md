@@ -27,7 +27,7 @@ graph TD
     
     F --> I
     H --> I[behavior.classify]:::compute
-    I --> J[7-Category Taxonomy<br>SELE, FEUO, PERE, etc.]:::output
+    I --> J[7-Category Taxonomy<br>SELE, FEUO, PERE, UR, etc.]:::output
     
     CHAIN --> DES[destination.infer_destinations<br>chain-first]:::compute
     C --> DES
@@ -111,6 +111,7 @@ Here are the key hyperparameters you can manipulate:
 *   **Zone Buffering (`buffer_distance`)**: In `ember.zones.classify_zones`, you can adjust the physical width of the Shadow Evacuation zone (default is `2000.0` meters).
 *   **Home Inference Grid (`grid_cell_size`)**: In `ember.ghost.infer_homes`, you can change the snapping resolution (default `50.0` meters).
 *   **Residency Thresholds (`min_nights`, `min_stay_time`)**: In `ghost.py`, you can strictly define who counts as a resident vs. a transient visitor (defaults strictly to `14` nights).
+*   **Evacuation Duration Thresholds (`min_evac_days`, `min_evac_days_buffer`)**: In `ember.pipeline.infer_metrics`, define the required consecutive days spent away from home overnight for a resident to be flagged as a potential evacuee. Can differ between in-zone and buffer-zone.
 *   **Trip Detection Radii (`home_radius`, `away_radius`)**: In `ember.departure.infer`, define what physical distance constitutes "leaving the neighborhood" (default `away_radius=1000.0`).
 *   **Nighttime Windows (`nighttime_start`, `nighttime_end`)**: In `ghost.py`, define when a user must be present to count as dwelling at home.
 *   **Activity Clustering Radius (`R_a`)**: In `ember.activities.incremental_cluster`, the spatial threshold for grouping GPS pings into an activity (default `200.0` metres).

@@ -124,7 +124,7 @@ def classify_zones(
     
     # Keep desired columns and convert back to 4326
     keep_cols = list(homes.columns) + ['ZoneType']
-    for extra in ['OrderStart', 'zoneId', 'FireEvent', 'most_extreme_status']:
+    for extra in ['OrderStart', 'OrderEnd', 'zoneId', 'FireEvent', 'most_extreme_status']:
         if extra in joined.columns:
             keep_cols.append(extra)
             
