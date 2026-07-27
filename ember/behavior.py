@@ -79,7 +79,7 @@ def classify(
             # Departed before fire started -> Trip, not evacuation
             if fire_start is not None and not pd.isna(fire_start):
                 if dep_time < fire_start:
-                    return 'NER'
+                    return 'UR'
                 
             # Self-Evacuee
             return 'SELE'
