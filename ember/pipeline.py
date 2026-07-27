@@ -436,6 +436,8 @@ def infer_metrics(
                     # Left before order/warning was issued
                     if ret < effective_start:
                         cat = "NER"   # returned before order — not an evacuee
+                    elif not pd.isna(fire_start_ts) and dep < fire_start_ts:
+                        cat = "UR"    # left before the fire started — a trip, not an evacuation
                     else:
                         cat = "SELE"  # self-evacuee leaving early
                 elif dep < order_end:
