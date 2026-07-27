@@ -34,7 +34,7 @@ def mock_zones():
     df = pd.DataFrame({
         'zoneId': ['z1', 'z2'],
         'most_extreme_status': ['Evacuation Order', 'Evacuation Warning'],
-        'incident_name': ['FireA', 'FireA'],
+        'incident_name': ['Eaton', 'Eaton'],
         'datetime': ['2025-01-01T12:00:00', '2025-01-01T10:00:00']
     })
     
@@ -74,3 +74,53 @@ def test_classify_zones(mock_homes, mock_zones):
     
     h1_start = result[result['ID'] == 'h1']['OrderStart'].iloc[0]
     assert pd.to_datetime(h1_start) == pd.to_datetime('2025-01-01T12:00:00')
+
+    # In-zone homes carry their zone's FireEvent; the buffer home inherits the
+    # nearest active zone's fire (here the only fire, Eaton).
+    assert result[result['ID'] == 'h1']['FireEvent'].iloc[0] == 'Eaton'
+    assert result[result['ID'] == 'h3']['FireEvent'].iloc[0] == 'Eaton'
+
+
+@pytest.fixture
+def mock_homes_two_fires():
+    # hA: inside FireA order; hB_buf: a shadow evacuee OUTSIDE every zone but nearest
+    # to FireB (far east); hFar: outside everything.
+    df = pd.DataFrame({
+        'ID': ['hA', 'hB_buf', 'hFar'],
+        'home_lat_4326': [34.10, 34.10, 34.10],
+        'home_lon_4326': [-118.10, -117.40, -119.50],
+    })
+    return gpd.GeoDataFrame(
+        df, geometry=gpd.points_from_xy(df.home_lon_4326, df.home_lat_4326), crs=EPSG_WGS84
+    )
+
+
+@pytest.fixture
+def mock_zones_two_fires():
+    # FireA far west (~-118.1), FireB far east (~-117.5); ~55 km apart.
+    pa = Polygon([(-118.15, 34.05), (-118.05, 34.05), (-118.05, 34.15), (-118.15, 34.15)])
+    pb = Polygon([(-117.55, 34.05), (-117.45, 34.05), (-117.45, 34.15), (-117.55, 34.15)])
+    df = pd.DataFrame({
+        'zoneId': ['za', 'zb'],
+        'most_extreme_status': ['Evacuation Order', 'Evacuation Order'],
+        'incident_name': ['Palisades', 'Eaton'],
+        'datetime': ['2025-01-01T12:00:00', '2025-01-01T18:00:00'],
+    })
+    return gpd.GeoDataFrame(df, geometry=[pa, pb], crs=EPSG_WGS84)
+
+
+def test_buffer_home_gets_nearest_fire(mock_homes_two_fires, mock_zones_two_fires):
+    """Regression: a shadow evacuee outside every zone must inherit the NEAREST fire,
+    not a global/longitude-split default. hB_buf sits just east of the Eaton zone and
+    must be attributed to Eaton even though the Palisades fire exists in the same study."""
+    result = classify_zones(
+        mock_homes_two_fires, mock_zones_two_fires,
+        buffer_distance=10000.0,  # 10 km: catches hB_buf near Eaton, not hFar
+        order_status='Evacuation Order', warning_status='Evacuation Warning',
+    )
+    by_id = result.set_index('ID')
+    assert by_id.loc['hA', 'ZoneType'] == 'Order'
+    assert by_id.loc['hA', 'FireEvent'] == 'Palisades'
+    assert by_id.loc['hB_buf', 'ZoneType'] == 'Buffer'
+    assert by_id.loc['hB_buf', 'FireEvent'] == 'Eaton'   # <- the fix (was NaN before)
+    assert by_id.loc['hFar', 'ZoneType'] == 'Outside'

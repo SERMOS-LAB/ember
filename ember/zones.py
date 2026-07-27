@@ -44,7 +44,10 @@ def classify_zones(
         - ZoneType: 'Order', 'Warning', 'Buffer', or 'Outside'
         - OrderStart: The earliest known datetime of the assigned status
         - zoneId: The ID of the matched zone
-        - FireEvent: The incident name matching the zone
+        - FireEvent: The incident name of the matched zone. For 'Buffer' homes
+          (which match only the dissolved buffer, not an individual zone) this is
+          the incident name of the NEAREST active zone, so shadow evacuees are still
+          attributed to a fire. 'Outside' homes have no FireEvent.
     """
     
     # 1. Prepare Homes
@@ -106,11 +109,28 @@ def classify_zones(
         if not all_active_zones.empty:
             unified_hazard_area = all_active_zones.union_all()
             buffered_area = unified_hazard_area.buffer(buffer_distance)
-            
+
             # Check intersection
             is_in_buffer = joined.loc[outside_mask, 'geometry'].intersects(buffered_area)
             joined.loc[outside_mask & is_in_buffer, 'ZoneType'] = 'Buffer'
-            
+
+            # Buffer homes matched only the dissolved-union buffer, never an individual
+            # zone, so the intersects-join left their incident_name (-> FireEvent) null.
+            # In a multi-fire study that means shadow evacuees have no fire attributed,
+            # and downstream per-fire timing falls back to a global default. Attribute
+            # each buffer home to its NEAREST active zone so FireEvent (and the per-fire
+            # start time keyed off it) is correct for shadow evacuees too.
+            buf_mask = joined['ZoneType'] == 'Buffer'
+            if buf_mask.any() and 'incident_name' in all_active_zones.columns:
+                nearest = gpd.sjoin_nearest(
+                    joined.loc[buf_mask, ['geometry']],
+                    all_active_zones[['geometry', 'incident_name']],
+                    how='left',
+                )
+                # ties (equidistant zones) can duplicate rows; keep the first per home
+                nearest = nearest[~nearest.index.duplicated(keep='first')]
+                joined.loc[buf_mask, 'incident_name'] = nearest['incident_name']
+
     # Clean up output
     rename_cols = {}
     if 'datetime' in joined.columns:
