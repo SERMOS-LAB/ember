@@ -9,6 +9,7 @@ from pyproj import Transformer
 from typing import Optional
 
 from ._constants import EPSG_WGS84, EPSG_UTM_11N
+from .timeutil import local_clock, resolve_tz
 
 
 def infer_homes(
@@ -20,6 +21,7 @@ def infer_homes(
     min_nights: int = 14,
     min_stay_time: float = 0.0,
     crs_meters: int = EPSG_UTM_11N,
+    local_tz: Optional[str] = None,
 ) -> gpd.GeoDataFrame:
     """
     Infer proxy home locations using the GHOST algorithm on raw GPS pings.
@@ -60,8 +62,9 @@ def infer_homes(
     if not pd.api.types.is_datetime64_any_dtype(pings['datetime']):
         pings['datetime'] = pd.to_datetime(pings['datetime'])
         
-    # Extract temporal features
-    hours = pings['datetime'].dt.hour
+    # Extract temporal features on the study area's clock
+    clock = local_clock(pings['datetime'], resolve_tz(pings['datetime'], local_tz))
+    hours = clock.dt.hour
     
     # Filter to nighttime pings
     if nighttime_start > nighttime_end:
@@ -77,7 +80,7 @@ def infer_homes(
         
     # Get distinct 'night dates'. Shift hours before midnight to the previous day so
     # that 11 PM Tuesday and 2 AM Wednesday count as the same 'night'.
-    offset_pings = night_pings['datetime'] - pd.Timedelta(hours=nighttime_end)
+    offset_pings = clock[night_mask] - pd.Timedelta(hours=nighttime_end)
     night_pings['night_date'] = offset_pings.dt.date
     night_pings['ts_sec'] = night_pings['datetime'].astype('int64') // 10**9
     

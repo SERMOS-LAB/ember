@@ -21,6 +21,7 @@ except ImportError:
 
 from .activities import haversine_m
 from .contracts import TRIP_CHAIN_SCHEMA, validate_columns
+from .timeutil import local_clock, resolve_tz
 
 
 # ---------------------------------------------------------------------------
@@ -53,6 +54,7 @@ def infer_destinations(
     home_lon_col: str = "home_lon_4326",
     include_intermediate: bool = False,
     include_return: bool = False,
+    local_tz: Optional[str] = None,
 ) -> pd.DataFrame:
     """
     Infer evacuation destinations from nightly stop data.
@@ -120,7 +122,8 @@ def infer_destinations(
     if "lon" in df.columns and lon_col not in df.columns:
         df = df.rename(columns={"lon": lon_col})
     if "start_ts" in df.columns and date_col not in df.columns:
-        df[date_col] = pd.to_datetime(df["start_ts"], utc=True).dt.date.astype(str)
+        start = pd.to_datetime(df["start_ts"], utc=True)
+        df[date_col] = local_clock(start, resolve_tz(start, local_tz)).dt.date.astype(str)
     if "dwell_s" in df.columns and duration_col not in df.columns:
         df[duration_col] = pd.to_numeric(df["dwell_s"], errors="coerce") / 60.0
 
@@ -212,8 +215,9 @@ def infer_destinations_from_chain(
     id_col: str = "ID",
     home_lat_col: str = "home_lat_4326",
     home_lon_col: str = "home_lon_4326",
+    local_tz: Optional[str] = None,
 ) -> pd.DataFrame:
-    """Infer destinations directly from canonical trip-chain artifacts."""
+    """Infer destinations directly from canonical trip-chain artifacts; dates are ``local_tz`` days."""
     if trip_chain.empty:
         return pd.DataFrame(
             columns=["ID", "dest_lat", "dest_lon", "dest_date", "eu_distance_km", "dest_order"]
@@ -240,7 +244,8 @@ def infer_destinations_from_chain(
             columns=["ID", "dest_lat", "dest_lon", "dest_date", "eu_distance_km", "dest_order"]
         )
 
-    df["dest_date"] = pd.to_datetime(df["start_ts"], utc=True).dt.date.astype(str)
+    start = pd.to_datetime(df["start_ts"], utc=True)
+    df["dest_date"] = local_clock(start, resolve_tz(start, local_tz)).dt.date.astype(str)
     df = df.merge(home_lookup, on=id_col, how="left")
 
     # Keep stops beyond home buffer

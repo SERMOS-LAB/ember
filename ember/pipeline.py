@@ -22,6 +22,8 @@ Typical usage
 
 from __future__ import annotations
 
+import warnings
+
 import numpy as np
 import pandas as pd
 import geopandas as gpd
@@ -30,6 +32,7 @@ from datetime import timedelta
 from typing import Dict, Optional
 from .contracts import PINGS_SCHEMA, canonicalize_columns, validate_columns
 from .mobility.trip_chain import TripChainConfig, build_trip_chain
+from .timeutil import UTC_WARNING, local_clock, resolve_tz
 
 
 # ---------------------------------------------------------------------------
@@ -97,6 +100,7 @@ def compute_stops(
     fire_zones: gpd.GeoDataFrame,
     *,
     buffer_meters: float = 2000,
+    local_tz: Optional[str] = None,
     verbose: bool = True,
 ) -> pd.DataFrame:
     """
@@ -113,6 +117,9 @@ def compute_stops(
         The original fire-zone polygons (used to build the buffer polygon).
     buffer_meters : float
         Buffer distance in metres for the outside-zone check.
+    local_tz : str, optional
+        IANA zone of the study area. ``stop_date`` becomes naive local clock time, so it compares with naive
+        local order and fire-start times and groups into local calendar days.
 
     Returns
     -------
@@ -148,12 +155,20 @@ def compute_stops(
     stops = pd.merge(stops, merge_src, on="ID", how="inner")
 
     # Parse ping times
+    from_epoch = False
     if "datetime" in stops.columns:
         stops["stop_date"] = pd.to_datetime(stops["datetime"])
     elif "TIMESTAMP" in stops.columns:
         stops["stop_date"] = pd.to_datetime(stops["TIMESTAMP"], unit="ms")
+        from_epoch = True
     else:
         stops["stop_date"] = pd.to_datetime(stops["Date"])
+    if local_tz is not None:
+        stops["stop_date"] = local_clock(stops["stop_date"], local_tz, assume_utc=from_epoch)
+    elif from_epoch:
+        warnings.warn(UTC_WARNING, UserWarning, stacklevel=2)
+    else:
+        resolve_tz(stops["stop_date"])
 
     # Distance calculation in EPSG:3857
     to_3857 = Transformer.from_crs("EPSG:4326", "EPSG:3857", always_xy=True)
@@ -200,8 +215,9 @@ def compute_trip_chain(
     merge_distance_m: float = 120.0,
     merge_gap_s: float = 3600.0,
     classify_return: bool = True,
+    local_tz: Optional[str] = None,
 ) -> pd.DataFrame:
-    """Build user stop chains with intermediate-stop tracking."""
+    """Build user stop chains with intermediate-stop tracking; ``local_tz`` sets the overnight clock."""
     points = canonicalize_columns(dau, PINGS_SCHEMA)
     homes_df = homes.copy()
     resolved_id_col = id_col
@@ -239,6 +255,7 @@ def compute_trip_chain(
         merge_distance_m=merge_distance_m,
         merge_gap_s=merge_gap_s,
         classify_return=classify_return,
+        local_tz=local_tz,
     )
     return build_trip_chain(
         points,
@@ -258,6 +275,7 @@ def compute_trip_chain(
         merge_distance_m=merge_distance_m,
         merge_gap_s=merge_gap_s,
         classify_return=classify_return,
+        local_tz=local_tz,
         rules=rules,
     )
 
@@ -317,6 +335,7 @@ def infer_metrics(
     min_dist_miles: float = 0.25,
     min_evac_days: int = 2,
     min_evac_days_buffer: int = 1,
+    local_tz: Optional[str] = None,
     verbose: bool = True,
 ) -> pd.DataFrame:
     """
@@ -343,6 +362,9 @@ def infer_metrics(
     min_evac_days_buffer : int
         Same threshold for buffer-zone residents.  Default 1 (N = 1
         for the Marshall Fire per Sun et al.).
+    local_tz : str, optional
+        IANA zone of the study area. Stop, order and fire-start times are read as local clock time, so
+        naive local strings and UTC stop times line up and calendar days are local days.
     verbose : bool
         Print progress information.
 
@@ -354,6 +376,13 @@ def infer_metrics(
     """
     fire_start_map = {k: pd.Timestamp(v) for k, v in fire_starts.items()}
     global_order_end = pd.to_datetime(fire_end) + timedelta(hours=23)
+    if local_tz is not None:
+        stops = stops.copy()
+        if not stops.empty:
+            stops["stop_date"] = local_clock(stops["stop_date"], local_tz)
+        fire_start_map = {k: local_clock(v, local_tz) for k, v in fire_start_map.items()}
+    elif not stops.empty:
+        resolve_tz(stops["stop_date"])
 
     # --- Timezone alignment ---------------------------------------------------
     # stop_date may be tz-aware (UTC) when parsed from epoch timestamps while
@@ -386,6 +415,8 @@ def infer_metrics(
         zone_type = grp.iloc[0]["ZoneType"]
         raw_order = grp.iloc[0]["OrderStart"]
         order_start = pd.to_datetime(raw_order) if not pd.isna(raw_order) else pd.NaT
+        if local_tz is not None and not pd.isna(order_start):
+            order_start = local_clock(order_start, local_tz)
         fire_event = grp.iloc[0].get("FireEvent", "Unknown")
 
         fire_start_ts = fire_start_map.get(fire_event, pd.NaT)
@@ -403,6 +434,8 @@ def infer_metrics(
                 order_end = global_order_end
             else:
                 o_end = pd.to_datetime(raw_end)
+                if local_tz is not None:
+                    o_end = local_clock(o_end, local_tz)
                 if _sample_tz is not None:
                     o_end = o_end.tz_localize(_sample_tz) if o_end.tzinfo is None else o_end.tz_convert(_sample_tz)
                 order_end = o_end

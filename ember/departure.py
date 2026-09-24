@@ -7,6 +7,7 @@ from typing import Optional, Tuple, Literal
 
 from .activities import find_origin as _find_origin, haversine_m
 from .contracts import TRIP_CHAIN_SCHEMA, validate_columns
+from .timeutil import local_clock, resolve_tz
 
 
 def _get_consecutive_intervals(dates: list) -> list:
@@ -43,6 +44,7 @@ def infer(
     home_lat: Optional[float] = None,
     home_lon: Optional[float] = None,
     trip_chain: Optional[pd.DataFrame] = None,
+    local_tz: Optional[str] = None,
 ) -> Tuple[Optional[pd.Timestamp], Optional[pd.Timestamp], str]:
     """
     Infer departure and return times for a single resident from raw pings.
@@ -86,6 +88,7 @@ def infer(
             trip_chain,
             away_radius=away_radius,
             order_start=order_start,
+            local_tz=local_tz,
         )
 
     origin_type = "home"
@@ -129,7 +132,9 @@ def infer(
             away_pings["timestamp_ms"], unit="ms", utc=True
         )
         
-    away_dates = away_pings["datetime"].dt.date.tolist()
+    tz = resolve_tz(away_pings["datetime"], local_tz)
+    away_days = local_clock(away_pings["datetime"], tz).dt.date
+    away_dates = away_days.tolist()
     
     intervals = _get_consecutive_intervals(away_dates)
     
@@ -139,7 +144,7 @@ def infer(
     # Select interval
     selected = None
     if order_start:
-        ref_date = order_start.date()
+        ref_date = local_clock(pd.Timestamp(order_start), tz).date()
         for interval in intervals:
             if interval[-1] >= ref_date:
                 selected = interval
@@ -155,11 +160,11 @@ def infer(
         return None, None, origin_type
         
     # Departure: earliest timestamp on the first day of the interval
-    mask_start = away_pings["datetime"].dt.date == selected[0]
+    mask_start = away_days == selected[0]
     dep_time = away_pings.loc[mask_start, "datetime"].min()
     
     # Return: latest timestamp on the last day of the interval
-    mask_end = away_pings["datetime"].dt.date == selected[-1]
+    mask_end = away_days == selected[-1]
     ret_time = away_pings.loc[mask_end, "datetime"].max()
     
     return dep_time, ret_time, origin_type
@@ -170,8 +175,9 @@ def infer_from_trip_chain(
     *,
     away_radius: float = 1000.0,
     order_start: Optional[pd.Timestamp] = None,
+    local_tz: Optional[str] = None,
 ) -> Tuple[Optional[pd.Timestamp], Optional[pd.Timestamp], str]:
-    """Infer departure/return using canonical trip-chain artifacts."""
+    """Infer departure/return using canonical trip-chain artifacts; days are ``local_tz`` calendar days."""
     if trip_chain.empty:
         return None, None, "home"
     validate_columns(trip_chain, TRIP_CHAIN_SCHEMA)
@@ -185,14 +191,16 @@ def infer_from_trip_chain(
     if away.empty:
         return None, None, "home"
 
-    away["away_date"] = pd.to_datetime(away["start_ts"], utc=True).dt.date
+    start = pd.to_datetime(away["start_ts"], utc=True)
+    tz = resolve_tz(start, local_tz)
+    away["away_date"] = local_clock(start, tz).dt.date
     intervals = _get_consecutive_intervals(away["away_date"].tolist())
     if not intervals:
         return None, None, "home"
 
     selected = None
     if order_start is not None:
-        ref_date = pd.Timestamp(order_start).date()
+        ref_date = local_clock(pd.Timestamp(order_start), tz).date()
         for interval in intervals:
             if interval[-1] >= ref_date:
                 selected = interval

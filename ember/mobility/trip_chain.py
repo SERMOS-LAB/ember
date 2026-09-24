@@ -8,6 +8,7 @@ from typing import Dict, List, Optional
 import pandas as pd
 
 from ..contracts import TRIP_CHAIN_SCHEMA, validate_columns
+from ..timeutil import local_clock, resolve_tz
 from .clustering import ClusterSummary, IncrementalClusterConfig, cluster_points, haversine_m
 
 
@@ -23,13 +24,16 @@ class TripChainConfig:
     merge_distance_m: float = 120.0
     merge_gap_s: float = 3600.0
     classify_return: bool = True
+    local_tz: Optional[str] = None
 
 
-def _is_overnight(start: pd.Timestamp, end: pd.Timestamp, night_start: int, night_end: int) -> bool:
-    """Return True when a stop overlaps the configured night window."""
+def _is_overnight(
+    start: pd.Timestamp, end: pd.Timestamp, night_start: int, night_end: int, tz: Optional[str] = None
+) -> bool:
+    """Return True when a stop overlaps the configured night window, read on the ``tz`` clock."""
     hours = pd.date_range(start.floor("h"), end.ceil("h"), freq="h")
     for ts in hours:
-        h = ts.hour
+        h = local_clock(ts, tz).hour
         if night_start > night_end:
             if h >= night_start or h < night_end:
                 return True
@@ -92,9 +96,12 @@ def build_trip_chain_for_user(
     merge_distance_m: float = 120.0,
     merge_gap_s: float = 3600.0,
     classify_return: bool = True,
+    local_tz: Optional[str] = None,
     rules: Optional[TripChainConfig] = None,
 ) -> pd.DataFrame:
-    """Build ordered stop-chain for one user."""
+    """Build ordered stop-chain for one user.
+
+    ``local_tz`` is the zone whose clock the overnight window is read on; it defaults to the pings' own zone."""
     if pings.empty:
         return pd.DataFrame()
 
@@ -117,7 +124,9 @@ def build_trip_chain_for_user(
         merge_distance_m=merge_distance_m,
         merge_gap_s=merge_gap_s,
         classify_return=classify_return,
+        local_tz=local_tz,
     )
+    tz = resolve_tz(pings[time_col], local_tz if local_tz is not None else cfg.local_tz)
     if cfg.merge_nearby_stops:
         clusters = _merge_adjacent_clusters(
             clusters,
@@ -154,6 +163,7 @@ def build_trip_chain_for_user(
             cluster.end_time,
             cfg.overnight_start_hour,
             cfg.overnight_end_hour,
+            tz,
         )
         if dist_home_m is not None and dist_home_m <= cfg.home_radius_m:
             role = "return" if cfg.classify_return and seen_away else "home"
@@ -209,9 +219,10 @@ def build_trip_chain(
     merge_distance_m: float = 120.0,
     merge_gap_s: float = 3600.0,
     classify_return: bool = True,
+    local_tz: Optional[str] = None,
     rules: Optional[TripChainConfig] = None,
 ) -> pd.DataFrame:
-    """Build trip-chain DataFrame for all users in pings."""
+    """Build trip-chain DataFrame for all users in pings (``local_tz``: see build_trip_chain_for_user)."""
     if pings.empty:
         return pd.DataFrame()
     required_ping_cols = [id_col, lat_col, lon_col, time_col]
@@ -257,6 +268,7 @@ def build_trip_chain(
             merge_distance_m=merge_distance_m,
             merge_gap_s=merge_gap_s,
             classify_return=classify_return,
+            local_tz=local_tz,
             rules=rules,
         )
         if not user_chain.empty:
